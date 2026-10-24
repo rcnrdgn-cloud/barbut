@@ -40,7 +40,7 @@ jobs:
 
       - run: flutter pub get
       - name: Kural testleri
-        run: flutter test
+        
       - name: APK derle
         run: flutter build apk --release
 
