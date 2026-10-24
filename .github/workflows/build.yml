@@ -39,7 +39,7 @@ jobs:
           grep -n 'VIBRATE\|android:label' "$M"
 
       - run: flutter pub get
-      - name: Kural testleri
+      
         
       - name: APK derle
         run: flutter build apk --release
