@@ -1,65 +1,1272 @@
 name: Uygulamayı derle
 
+# Tek dosyalık kurulum: tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Depoda başka hiçbir dosyaya gerek yoktur.
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      ios:
-        description: "iOS derlemesini de dene (imzasız, yalnızca kontrol için)"
-        type: boolean
-        default: false
 
 jobs:
   android:
     name: Android APK
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      - name: Android/iOS klasörlerini oluştur
-        run: flutter create . --platforms=android,ios --org com.ercan --project-name barbut
+      - name: Boş Flutter projesi oluştur
+        run: flutter create --org com.ercan --project-name barbut --platforms=android,ios barbut_app
+
+      - name: Barbut kodunu yaz
+        working-directory: barbut_app
+        run: |
+          set -e
+          rm -rf lib test tool
+          mkdir -p lib test tool assets/sounds
+          cat > pubspec.yaml <<'BARBUT_EOF'
+          name: barbut
+          description: İki kişilik barbut zar oyunu — gerçek zar hissi, ses ve titreşimle.
+          publish_to: 'none'
+          version: 0.1.0+1
+
+          environment:
+            sdk: ">=3.3.0 <4.0.0"
+
+          dependencies:
+            flutter:
+              sdk: flutter
+            audioplayers: ^6.1.0
+            sensors_plus: ^6.1.0
+            vibration: ">=2.0.0 <4.0.0"
+
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+            flutter_lints: ^4.0.0
+
+          flutter:
+            uses-material-design: true
+            assets:
+              - assets/sounds/
+          BARBUT_EOF
+          cat > lib/main.dart <<'BARBUT_EOF'
+          import 'package:flutter/material.dart';
+          import 'package:flutter/services.dart';
+
+          import 'feel.dart';
+          import 'palette.dart';
+          import 'table_screen.dart';
+
+          Future<void> main() async {
+            WidgetsFlutterBinding.ensureInitialized();
+            await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+            await Feel.I.init();
+            runApp(const BarbutApp());
+          }
+
+          class BarbutApp extends StatelessWidget {
+            const BarbutApp({super.key});
+
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'Barbut',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(
+                  brightness: Brightness.dark,
+                  scaffoldBackgroundColor: Palette.bg,
+                  colorScheme: const ColorScheme.dark(
+                    primary: Palette.gold,
+                    surface: Palette.surface,
+                    onSurface: Palette.ink,
+                  ),
+                ),
+                home: const TableScreen(),
+              );
+            }
+          }
+          BARBUT_EOF
+          cat > lib/palette.dart <<'BARBUT_EOF'
+          import 'package:flutter/material.dart';
+
+          /// Lacivert tepsi, kemik zar, eski altın.
+          class Palette {
+            static const bg = Color(0xFF0E1222);
+            static const surface = Color(0xFF151B30);
+            static const ink = Color(0xFFE9E1CE);
+            static const muted = Color(0xFF9EA2B5);
+            static const line = Color(0x24E9E1CE);
+            static const gold = Color(0xFFD4B158);
+            static const win = Color(0xFF6CC79B);
+            static const lose = Color(0xFFEE7B8C);
+            static const tray = Color(0xFF121A36);
+            static const trayEdge = Color(0xFFB8933A);
+            static const bone = Color(0xFFEFE6D2);
+            static const boneLight = Color(0xFFFBF6EA);
+            static const boneShade = Color(0xFFCDBF9F);
+            static const pip = Color(0xFF1B1712);
+            static const pipRed = Color(0xFFA3192E);
+
+            static const display = 'serif';
+          }
+          BARBUT_EOF
+          cat > lib/game.dart <<'BARBUT_EOF'
+          import 'dart:math';
+
+          enum Outcome { win, lose, pass }
+
+          /// Bir zar atışı. [by] atan oyuncu (0 ya da 1), [amount] el değiştiren akçe.
+          class Roll {
+            const Roll(this.d1, this.d2, this.by, this.out, this.amount);
+            final int d1, d2, by, amount;
+            final Outcome out;
+          }
+
+          const _winning = {'6-6', '5-5', '3-3', '6-5'};
+          const _losing = {'1-1', '2-2', '4-4', '2-1'};
+
+          Outcome judge(int a, int b) {
+            final key = '${max(a, b)}-${min(a, b)}';
+            if (_winning.contains(key)) return Outcome.win;
+            if (_losing.contains(key)) return Outcome.lose;
+            return Outcome.pass;
+          }
+
+          class Game {
+            static const start = 100;
+            static const stake = 10;
+
+            final List<int> akce = [start, start];
+            final List<Roll> log = [];
+            int turn = 0;
+            int? winner;
+            final Random _rng = Random.secure();
+
+            bool get over => winner != null;
+
+            /// Zarı atar ama sonucu henüz uygulamaz: animasyon bitince [apply] çağrılır.
+            Roll draw() {
+              final d1 = _rng.nextInt(6) + 1, d2 = _rng.nextInt(6) + 1;
+              final s = turn, o = 1 - turn, out = judge(d1, d2);
+              final amount = switch (out) {
+                Outcome.win => min(stake, akce[o]),
+                Outcome.lose => min(stake, akce[s]),
+                Outcome.pass => 0,
+              };
+              return Roll(d1, d2, s, out, amount);
+            }
+
+            bool endsGame(Roll r) {
+              if (r.out == Outcome.pass) return false;
+              final loser = r.out == Outcome.win ? 1 - r.by : r.by;
+              return akce[loser] - r.amount <= 0;
+            }
+
+            void apply(Roll r) {
+              final o = 1 - r.by;
+              if (r.out == Outcome.win) {
+                akce[o] -= r.amount;
+                akce[r.by] += r.amount;
+              } else if (r.out == Outcome.lose) {
+                akce[r.by] -= r.amount;
+                akce[o] += r.amount;
+              }
+              log.insert(0, r);
+              if (log.length > 12) log.removeLast();
+              turn = o; // zar her atıştan sonra rakibe geçer
+              if (akce[0] <= 0) winner = 1;
+              if (akce[1] <= 0) winner = 0;
+            }
+
+            void reset() {
+              final w = winner;
+              akce[0] = start;
+              akce[1] = start;
+              turn = w == null ? 0 : 1 - w; // kaybeden başlar
+              winner = null;
+              log.clear();
+            }
+          }
+          BARBUT_EOF
+          cat > lib/feel.dart <<'BARBUT_EOF'
+          import 'dart:async';
+          import 'dart:io' show Platform;
+          import 'dart:math';
+
+          import 'package:audioplayers/audioplayers.dart';
+          import 'package:flutter/services.dart';
+          import 'package:vibration/vibration.dart';
+
+          import 'game.dart';
+
+          typedef _IosHaptic = Future<void> Function();
+
+          /// Ses + titreşim. Tüm zamanlamalar ekrandaki zar animasyonuyla aynı.
+          ///
+          /// Düğmeyle atış:   0 ms def + kupada çalkalama, 640 ms savruluş,
+          ///                  860/1100/1300/1440/1540 ms tepsiye çarpmalar, 1720 ms sonuç.
+          /// Sallayarak atış: kupa kısmı atlanır (onu zaten elinde hissettin),
+          ///                  savruluş 0 ms'de, sonuç 1080 ms'de.
+          class Feel {
+            Feel._();
+            static final Feel I = Feel._();
+
+            static const cupMs = 640;
+            static int revealAt(bool fromShake) => (fromShake ? 0 : cupMs) + 1080;
+
+            bool soundOn = true;
+            bool hapticsOn = true;
+
+            final _rng = Random();
+            final List<AudioPlayer> _ticks = List.generate(4, (_) => AudioPlayer());
+            int _tickIndex = 0;
+            final _cup = AudioPlayer();
+            final _throw = AudioPlayer();
+            final _result = AudioPlayer();
+            final _final = AudioPlayer();
+            final List<Timer> _timers = [];
+
+            bool _canVibrate = false;
+            bool _amplitude = false;
+
+            Future<void> init() async {
+              try {
+                _canVibrate = (await Vibration.hasVibrator()) == true;
+                _amplitude = (await Vibration.hasAmplitudeControl()) == true;
+              } catch (_) {}
+            }
+
+            void cancel() {
+              for (final t in _timers) {
+                t.cancel();
+              }
+              _timers.clear();
+            }
+
+            void _at(int ms, void Function() fn) =>
+                _timers.add(Timer(Duration(milliseconds: ms), fn));
+
+            Future<void> _play(AudioPlayer p, String asset,
+                {double volume = 1, PlayerMode mode = PlayerMode.mediaPlayer}) async {
+              if (!soundOn) return;
+              try {
+                await p.stop();
+                await p.play(AssetSource(asset), volume: volume, mode: mode);
+              } catch (_) {}
+            }
+
+            /// Tek bir titreşim darbesi. Android'de süre + güç (1-255),
+            /// iPhone'da Taptic Engine darbesi.
+            void _hit(int ms, int amplitude, _IosHaptic ios) {
+              if (!hapticsOn) return;
+              if (Platform.isIOS || !_canVibrate) {
+                ios();
+                return;
+              }
+              if (_amplitude) {
+                Vibration.vibrate(duration: ms, amplitude: amplitude.clamp(1, 255));
+              } else {
+                Vibration.vibrate(duration: ms);
+              }
+            }
+
+            /// Telefon sallanırken zarın kupada çarpması.
+            void tick(double power) {
+              final p = _ticks[_tickIndex++ % _ticks.length];
+              _play(p, 'sounds/tick_${1 + _rng.nextInt(4)}.wav',
+                  volume: (0.45 + power / 40).clamp(0.4, 1.0), mode: PlayerMode.lowLatency);
+              _hit(14, (70 + power * 5).round().clamp(60, 200), HapticFeedback.selectionClick);
+            }
+
+            void playThrow(Roll r, {required bool fromShake, required bool finalRoll}) {
+              cancel();
+              final t0 = fromShake ? 0 : cupMs;
+
+              if (!fromShake) {
+                _play(_cup, 'sounds/cup_${1 + _rng.nextInt(2)}.wav');
+                _at(0, () => _hit(55, 255, HapticFeedback.heavyImpact));
+                for (final t in const [90, 160, 215, 300, 355, 430, 490, 570, 625]) {
+                  _at(t, () => _hit(16, 110, HapticFeedback.selectionClick));
+                }
+              }
+
+              _at(t0, () => _play(_throw, 'sounds/throw_${1 + _rng.nextInt(3)}.wav'));
+
+              // tepsiye çarpmalar: [zaman, süre, güç]
+              const bounces = [
+                [220, 55, 255],
+                [460, 34, 190],
+                [660, 22, 140],
+                [800, 13, 100],
+                [900, 8, 70],
+              ];
+              for (var i = 0; i < bounces.length; i++) {
+                final b = bounces[i];
+                final _IosHaptic ios = i == 0
+                    ? HapticFeedback.heavyImpact
+                    : i < 3
+                        ? HapticFeedback.mediumImpact
+                        : HapticFeedback.lightImpact;
+                _at(t0 + b[0], () => _hit(b[1], b[2], ios));
+              }
+
+              final tr = t0 + 1080;
+              _at(tr, () {
+                _play(_result, switch (r.out) {
+                  Outcome.win => 'sounds/win.wav',
+                  Outcome.lose => 'sounds/lose.wav',
+                  Outcome.pass => 'sounds/pass.wav',
+                });
+              });
+              switch (r.out) {
+                case Outcome.win: // üç kısa, sonuncusu dolgun
+                  _at(tr, () => _hit(28, 200, HapticFeedback.mediumImpact));
+                  _at(tr + 80, () => _hit(28, 200, HapticFeedback.mediumImpact));
+                  _at(tr + 170, () => _hit(90, 255, HapticFeedback.heavyImpact));
+                case Outcome.lose: // uzun, ağır bir gong titreşimi
+                  _at(tr, () => _hit(240, 255, HapticFeedback.heavyImpact));
+                  _at(tr + 110, () { if (Platform.isIOS) HapticFeedback.heavyImpact(); });
+                  _at(tr + 230, () { if (Platform.isIOS) HapticFeedback.mediumImpact(); });
+                case Outcome.pass:
+                  _at(tr, () => _hit(18, 90, HapticFeedback.lightImpact));
+              }
+
+              if (finalRoll) {
+                _at(tr + 2400, () => _play(_final, 'sounds/final.wav'));
+                for (final d in const [0, 90, 180, 270, 900]) {
+                  _at(tr + 2400 + d, () => _hit(d == 900 ? 200 : 25, 255, HapticFeedback.heavyImpact));
+                }
+              }
+            }
+          }
+          BARBUT_EOF
+          cat > lib/shake.dart <<'BARBUT_EOF'
+          import 'dart:async';
+          import 'dart:math';
+
+          import 'package:sensors_plus/sensors_plus.dart';
+
+          /// Telefonu kupa gibi sallamayı algılar. Sallarken [onRattle],
+          /// sallama bitince (kısa bir duraksama) [onRelease] çağrılır: zar atılır.
+          class ShakeDetector {
+            ShakeDetector({required this.onRattle, required this.onRelease, this.threshold = 12});
+
+            final void Function(double power) onRattle;
+            final void Function() onRelease;
+            final double threshold; // m/s², yerçekimi hariç
+
+            bool enabled = true;
+            StreamSubscription<UserAccelerometerEvent>? _sub;
+            bool _shaking = false;
+            DateTime _start = DateTime(0), _last = DateTime(0), _lastTick = DateTime(0);
+
+            void start() {
+              _sub ??= userAccelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)
+                  .listen(_onEvent, onError: (Object _) {});
+            }
+
+            void stop() {
+              _sub?.cancel();
+              _sub = null;
+              _shaking = false;
+            }
+
+            void _onEvent(UserAccelerometerEvent e) {
+              if (!enabled) {
+                _shaking = false;
+                return;
+              }
+              final m = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+              final now = DateTime.now();
+              if (m > threshold) {
+                if (!_shaking) {
+                  _shaking = true;
+                  _start = now;
+                }
+                _last = now;
+                if (now.difference(_lastTick).inMilliseconds > 70) {
+                  _lastTick = now;
+                  onRattle(m);
+                }
+              } else if (_shaking && now.difference(_last).inMilliseconds > 320) {
+                _shaking = false;
+                if (_last.difference(_start).inMilliseconds > 250) onRelease();
+              }
+            }
+          }
+          BARBUT_EOF
+          cat > lib/die.dart <<'BARBUT_EOF'
+          import 'dart:math';
+
+          import 'package:flutter/material.dart';
+
+          import 'palette.dart';
+
+          const _pips = {
+            1: [4],
+            2: [0, 8],
+            3: [0, 4, 8],
+            4: [0, 2, 6, 8],
+            5: [0, 2, 4, 6, 8],
+            6: [0, 2, 3, 5, 6, 8],
+          };
+
+          /// Kemik renkli zar yüzü; 1 ve 4 noktaları kırmızı.
+          class DieFace extends StatelessWidget {
+            const DieFace({super.key, required this.value, required this.size, this.shadow = true});
+            final int value;
+            final double size;
+            final bool shadow;
+
+            @override
+            Widget build(BuildContext context) => CustomPaint(
+                  size: Size.square(size),
+                  painter: _DiePainter(value, shadow),
+                );
+          }
+
+          class _DiePainter extends CustomPainter {
+            _DiePainter(this.value, this.shadow);
+            final int value;
+            final bool shadow;
+
+            @override
+            void paint(Canvas canvas, Size size) {
+              final w = size.width;
+              final rect = Offset.zero & size;
+              final rr = RRect.fromRectAndRadius(rect, Radius.circular(w * 0.18));
+              if (shadow) {
+                canvas.drawRRect(
+                  rr.shift(Offset(0, w * 0.08)),
+                  Paint()
+                    ..color = const Color(0x66000000)
+                    ..maskFilter = MaskFilter.blur(BlurStyle.normal, w * 0.07),
+                );
+              }
+              canvas.drawRRect(
+                rr,
+                Paint()
+                  ..shader = const RadialGradient(
+                    center: Alignment(-0.4, -0.5),
+                    radius: 1.1,
+                    colors: [Palette.boneLight, Palette.bone, Palette.boneShade],
+                    stops: [0, 0.55, 1],
+                  ).createShader(rect),
+              );
+              canvas.drawRRect(
+                rr.deflate(0.5),
+                Paint()
+                  ..style = PaintingStyle.stroke
+                  ..strokeWidth = 1
+                  ..color = const Color(0x1F000000),
+              );
+              final red = value == 1 || value == 4;
+              final r = w * (value == 1 ? 0.11 : 0.082);
+              const f = [0.26, 0.5, 0.74];
+              for (final i in _pips[value] ?? const <int>[]) {
+                final c = Offset(w * f[i % 3], w * f[i ~/ 3]);
+                canvas.drawCircle(
+                  c,
+                  r,
+                  Paint()
+                    ..shader = RadialGradient(
+                      center: const Alignment(-0.25, -0.3),
+                      colors: red
+                          ? const [Color(0xFFD8455A), Palette.pipRed]
+                          : const [Color(0xFF4A4036), Palette.pip],
+                    ).createShader(Rect.fromCircle(center: c, radius: r)),
+                );
+              }
+            }
+
+            @override
+            bool shouldRepaint(covariant _DiePainter old) => old.value != value || old.shadow != shadow;
+          }
+
+          /// Atış animasyonu: kupada çalkalanma, savruluş, tepside sekmeler.
+          /// Zamanlama [Feel] ile birebir aynı (çarpmalar 220/460/660/800/900 ms).
+          class TumblingDie extends StatefulWidget {
+            const TumblingDie({
+              super.key,
+              required this.value,
+              required this.rollId,
+              required this.withCup,
+              required this.side,
+              required this.size,
+            });
+
+            final int value;
+            final int rollId;
+            final bool withCup;
+            final double side; // +1 sol zar, -1 sağ zar
+            final double size;
+
+            @override
+            State<TumblingDie> createState() => _TumblingDieState();
+          }
+
+          class _TumblingDieState extends State<TumblingDie> with SingleTickerProviderStateMixin {
+            late final AnimationController _c =
+                AnimationController(vsync: this, duration: const Duration(milliseconds: 1620));
+
+            @override
+            void didUpdateWidget(covariant TumblingDie old) {
+              super.didUpdateWidget(old);
+              if (widget.rollId != old.rollId) {
+                final reduce = MediaQuery.of(context).disableAnimations;
+                _c.duration = Duration(milliseconds: reduce ? 300 : (widget.withCup ? 1620 : 980));
+                _c.forward(from: 0);
+              }
+            }
+
+            @override
+            void dispose() {
+              _c.dispose();
+              super.dispose();
+            }
+
+            int _flicker(double ms) =>
+                (((ms ~/ 70) * 7 + (widget.side > 0 ? 3 : 5) + widget.rollId) % 6) + 1;
+
+            static double _bounceY(double t) {
+              const hits = [220.0, 460.0, 660.0, 800.0, 900.0];
+              const heights = [30.0, 12.0, 5.0, 2.0];
+              if (t < hits[0]) {
+                final p = t / hits[0];
+                return -70 * (1 - p) - 160 * p * (1 - p);
+              }
+              for (var k = 0; k < hits.length - 1; k++) {
+                if (t < hits[k + 1]) {
+                  final p = (t - hits[k]) / (hits[k + 1] - hits[k]);
+                  return -4 * heights[k] * p * (1 - p);
+                }
+              }
+              return 0;
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return AnimatedBuilder(
+                animation: _c,
+                builder: (context, _) {
+                  if (!_c.isAnimating) return DieFace(value: widget.value, size: widget.size);
+                  final total = _c.duration!.inMilliseconds.toDouble();
+                  final ms = _c.value * total;
+                  final cup = widget.withCup && total > 900 ? 640.0 : 0.0;
+                  final sx = widget.side * 52;
+                  double x, y, scale, spin, tiltX = 0, tiltY = 0;
+                  int face;
+                  if (ms < cup) {
+                    x = sx + sin(ms * 0.09 + widget.side) * 6;
+                    y = -70 + cos(ms * 0.11) * 6;
+                    scale = 0.8;
+                    spin = sin(ms * 0.05) * 0.15;
+                    face = _flicker(ms);
+                  } else {
+                    final u = ((ms - cup) / (total - cup)).clamp(0.0, 1.0);
+                    final settle = Curves.easeOutCubic.transform(u);
+                    x = sx * (1 - settle);
+                    y = _bounceY(u * 980);
+                    scale = 1 + 0.12 * (-y / 110).clamp(0.0, 1.0);
+                    spin = widget.side * 4 * pi * (1 - settle);
+                    tiltX = sin(u * 20) * (1 - settle) * 0.9;
+                    tiltY = cos(u * 17) * (1 - settle) * 0.9;
+                    face = u < 0.82 ? _flicker(ms) : widget.value;
+                  }
+                  return Transform.translate(
+                    offset: Offset(x, y),
+                    child: Transform(
+                      alignment: Alignment.center,
+                      transform: Matrix4.identity()
+                        ..setEntry(3, 2, 0.0015)
+                        ..rotateZ(spin)
+                        ..rotateX(tiltX)
+                        ..rotateY(tiltY),
+                      child: Transform.scale(
+                        scale: scale,
+                        child: DieFace(value: face, size: widget.size),
+                      ),
+                    ),
+                  );
+                },
+              );
+            }
+          }
+
+          /// Kurallar tablosu: hangi çiftler kazandırır, hangileri kaybettirir.
+          class RulesLegend extends StatelessWidget {
+            const RulesLegend({super.key});
+
+            Widget _pair(int a, int b) => Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: const Color(0x24D4B158),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    DieFace(value: a, size: 26, shadow: false),
+                    const SizedBox(width: 4),
+                    DieFace(value: b, size: 26, shadow: false),
+                  ]),
+                );
+
+            Widget _group(String title, Color color, List<List<int>> pairs) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: TextStyle(color: color, fontWeight: FontWeight.w700)),
+                    const SizedBox(height: 8),
+                    Wrap(spacing: 10, runSpacing: 10, children: [for (final p in pairs) _pair(p[0], p[1])]),
+                  ],
+                );
+
+            @override
+            Widget build(BuildContext context) => Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _group('Atana kazandırır', Palette.win, const [[6, 6], [5, 5], [3, 3], [6, 5]]),
+                    const SizedBox(height: 18),
+                    _group('Atana kaybettirir', Palette.lose, const [[1, 1], [2, 2], [4, 4], [1, 2]]),
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Her oyuncu 100 akçeyle başlar, her karar 10 akçedir. Diğer atışlar sonuçsuzdur. '
+                      'Zar her atıştan sonra rakibe geçer. Akçesi biten masadan kalkar.',
+                      style: TextStyle(color: Palette.muted, height: 1.45),
+                    ),
+                  ],
+                );
+          }
+          BARBUT_EOF
+          cat > lib/table_screen.dart <<'BARBUT_EOF'
+          import 'dart:async';
+          import 'dart:math';
+
+          import 'package:flutter/material.dart';
+
+          import 'die.dart';
+          import 'feel.dart';
+          import 'game.dart';
+          import 'palette.dart';
+          import 'shake.dart';
+
+          class TableScreen extends StatefulWidget {
+            const TableScreen({super.key});
+
+            @override
+            State<TableScreen> createState() => _TableScreenState();
+          }
+
+          class _TableScreenState extends State<TableScreen> {
+            final game = Game();
+            List<int> dice = [6, 5];
+            int rollId = 0;
+            bool withCup = true;
+            bool busy = false;
+            bool shakeOn = false;
+            bool verdictOn = false;
+            Roll? shown;
+            Timer? _reveal;
+
+            late final ShakeDetector _shake = ShakeDetector(
+              onRattle: (p) => Feel.I.tick(p),
+              onRelease: () => _roll(fromShake: true),
+            );
+
+            @override
+            void dispose() {
+              _reveal?.cancel();
+              _shake.stop();
+              Feel.I.cancel();
+              super.dispose();
+            }
+
+            void _syncShake() => _shake.enabled = shakeOn && !busy && !game.over;
+
+            void _roll({required bool fromShake}) {
+              if (busy || game.over) return;
+              final r = game.draw();
+              final ends = game.endsGame(r);
+              setState(() {
+                busy = true;
+                rollId++;
+                dice = [r.d1, r.d2];
+                withCup = !fromShake;
+                verdictOn = false;
+              });
+              _syncShake();
+              Feel.I.playThrow(r, fromShake: fromShake, finalRoll: ends);
+              _reveal?.cancel();
+              _reveal = Timer(Duration(milliseconds: Feel.revealAt(fromShake)), () {
+                if (!mounted) return;
+                setState(() {
+                  game.apply(r);
+                  shown = r;
+                  busy = false;
+                  verdictOn = true;
+                });
+                _syncShake();
+              });
+            }
+
+            void _rematch() {
+              setState(() {
+                game.reset();
+                shown = null;
+                verdictOn = false;
+              });
+              _syncShake();
+            }
+
+            void _toggleShake() {
+              setState(() => shakeOn = !shakeOn);
+              if (shakeOn) {
+                _shake.start();
+              } else {
+                _shake.stop();
+              }
+              _syncShake();
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                body: SafeArea(
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                    children: [
+                      _topBar(),
+                      const SizedBox(height: 12),
+                      Row(children: [
+                        Expanded(child: _plaque(0)),
+                        const SizedBox(width: 10),
+                        Expanded(child: _plaque(1)),
+                      ]),
+                      const SizedBox(height: 16),
+                      _tray(context),
+                      const SizedBox(height: 20),
+                      _controls(),
+                      const SizedBox(height: 28),
+                      _title('Son atışlar'),
+                      ..._log(),
+                      const SizedBox(height: 28),
+                      _title('Atışlar'),
+                      const RulesLegend(),
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            Widget _title(String t) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Text(t,
+                      style: const TextStyle(fontFamily: Palette.display, fontSize: 22, color: Palette.ink)),
+                );
+
+            Widget _topBar() => Row(children: [
+                  const Text('Barbut',
+                      style: TextStyle(
+                          fontFamily: Palette.display, fontSize: 28, color: Palette.gold, letterSpacing: 1)),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: Feel.I.soundOn ? 'Sesi kapat' : 'Sesi aç',
+                    icon: Icon(Feel.I.soundOn ? Icons.volume_up : Icons.volume_off, color: Palette.ink),
+                    onPressed: () => setState(() => Feel.I.soundOn = !Feel.I.soundOn),
+                  ),
+                  IconButton(
+                    tooltip: Feel.I.hapticsOn ? 'Titreşimi kapat' : 'Titreşimi aç',
+                    icon: Icon(Feel.I.hapticsOn ? Icons.vibration : Icons.mobile_off, color: Palette.ink),
+                    onPressed: () => setState(() => Feel.I.hapticsOn = !Feel.I.hapticsOn),
+                  ),
+                ]);
+
+            Widget _plaque(int i) {
+              final active = !game.over && game.turn == i;
+              Color amountColor = Palette.ink;
+              final s = shown;
+              if (verdictOn && s != null && s.out != Outcome.pass) {
+                final winnerSeat = s.out == Outcome.win ? s.by : 1 - s.by;
+                amountColor = winnerSeat == i ? Palette.win : Palette.lose;
+              }
+              final tag = game.winner == i ? 'Masanın galibi' : (active ? 'Zar onda' : '');
+              return AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Palette.surface,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: active ? Palette.gold : Palette.line, width: active ? 2 : 1),
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('${i + 1}. oyuncu',
+                      style: const TextStyle(fontWeight: FontWeight.w700, color: Palette.ink)),
+                  const SizedBox(height: 4),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Text('${game.akce[i]}',
+                          style: TextStyle(fontFamily: Palette.display, fontSize: 28, color: amountColor)),
+                      const SizedBox(width: 6),
+                      const Text('akçe', style: TextStyle(color: Palette.muted, fontSize: 13)),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(tag, style: const TextStyle(color: Palette.gold, fontSize: 13)),
+                ]),
+              );
+            }
+
+            Widget _tray(BuildContext context) {
+              final width = MediaQuery.of(context).size.width;
+              final dieSize = min(88.0, width * 0.2);
+              return Container(
+                height: 290,
+                decoration: BoxDecoration(
+                  color: Palette.tray,
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(color: Palette.trayEdge, width: 2),
+                  boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 24, offset: Offset(0, 10))],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(20),
+                  child: Stack(children: [
+                    Positioned.fill(child: CustomPaint(painter: _GirihPainter())),
+                    Positioned.fill(
+                      bottom: 44,
+                      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                        TumblingDie(value: dice[0], rollId: rollId, withCup: withCup, side: 1, size: dieSize),
+                        const SizedBox(width: 48),
+                        TumblingDie(value: dice[1], rollId: rollId, withCup: withCup, side: -1, size: dieSize),
+                      ]),
+                    ),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 14,
+                      child: AnimatedOpacity(
+                        opacity: verdictOn ? 1 : 0,
+                        duration: const Duration(milliseconds: 400),
+                        child: _verdict(),
+                      ),
+                    ),
+                  ]),
+                ),
+              );
+            }
+
+            Widget _verdict() {
+              final r = shown;
+              if (r == null) return const SizedBox(height: 44);
+              final who = '${r.by + 1}. oyuncu';
+              final (String title, String sub, Color color) = switch (r.out) {
+                Outcome.win => ('Barbut!', '$who ${r.amount} akçe kazandı', const Color(0xFF9FE0BE)),
+                Outcome.lose => ('Kaybettiren atış', '$who ${r.amount} akçe kaybetti', const Color(0xFFF49AA8)),
+                Outcome.pass => ('Sonuçsuz', 'Zar rakibe geçti', Palette.ink),
+              };
+              return Column(children: [
+                Text(title, style: TextStyle(fontFamily: Palette.display, fontSize: 24, color: color)),
+                Text(sub, style: const TextStyle(color: Color(0xBFE9E1CE), fontSize: 14)),
+              ]);
+            }
+
+            Widget _controls() {
+              final buttonStyle = FilledButton.styleFrom(
+                backgroundColor: Palette.gold,
+                foregroundColor: Palette.bg,
+                disabledBackgroundColor: const Color(0x66D4B158),
+                disabledForegroundColor: Palette.bg,
+                shape: const StadiumBorder(),
+                padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
+              );
+              const label = TextStyle(fontFamily: Palette.display, fontSize: 22);
+              return Column(children: [
+                if (!game.over)
+                  FilledButton(
+                    style: buttonStyle,
+                    onPressed: busy ? null : () => _roll(fromShake: false),
+                    child: Text('Zarı at (${game.turn + 1}. oyuncu)', style: label),
+                  )
+                else ...[
+                  Text('${(game.winner ?? 0) + 1}. oyuncu masayı kazandı.',
+                      style: const TextStyle(color: Palette.ink, fontSize: 16)),
+                  const SizedBox(height: 10),
+                  FilledButton(
+                    style: buttonStyle,
+                    onPressed: _rematch,
+                    child: const Text('Yeniden oyna', style: label),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: _toggleShake,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: shakeOn ? Palette.gold : Palette.ink,
+                    side: BorderSide(color: shakeOn ? Palette.gold : Palette.line),
+                  ),
+                  icon: Icon(shakeOn ? Icons.vibration : Icons.back_hand_outlined),
+                  label: Text(shakeOn ? 'Sallama açık: salla, sonra dur' : 'Telefonu sallayarak at'),
+                ),
+              ]);
+            }
+
+            List<Widget> _log() {
+              if (game.log.isEmpty) {
+                return const [Text('Henüz zar atılmadı.', style: TextStyle(color: Palette.muted))];
+              }
+              return [
+                for (final r in game.log)
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Palette.line))),
+                    child: Row(children: [
+                      DieFace(value: r.d1, size: 22, shadow: false),
+                      const SizedBox(width: 4),
+                      DieFace(value: r.d2, size: 22, shadow: false),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text('${r.by + 1}. oyuncu', style: const TextStyle(color: Palette.ink))),
+                      Text(
+                        switch (r.out) {
+                          Outcome.win => '+${r.amount}',
+                          Outcome.lose => '−${r.amount}',
+                          Outcome.pass => 'sonuçsuz',
+                        },
+                        style: TextStyle(
+                          color: switch (r.out) {
+                            Outcome.win => Palette.win,
+                            Outcome.lose => Palette.lose,
+                            Outcome.pass => Palette.muted,
+                          },
+                        ),
+                      ),
+                    ]),
+                  ),
+              ];
+            }
+          }
+
+          /// Tepsi zemininde silik sekiz köşeli yıldız (girih) deseni.
+          class _GirihPainter extends CustomPainter {
+            @override
+            void paint(Canvas canvas, Size size) {
+              final p = Paint()
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 1
+                ..color = const Color(0x26B8933A);
+              const step = 64.0;
+              for (double y = 0; y < size.height + step; y += step) {
+                for (double x = 0; x < size.width + step; x += step) {
+                  final c = Offset(x + 32, y + 32);
+                  canvas.drawRect(Rect.fromCenter(center: c, width: 30, height: 30), p);
+                  canvas.save();
+                  canvas.translate(c.dx, c.dy);
+                  canvas.rotate(pi / 4);
+                  canvas.drawRect(Rect.fromCenter(center: Offset.zero, width: 30, height: 30), p);
+                  canvas.restore();
+                  final path = Path();
+                  for (var k = 0; k < 16; k++) {
+                    final a = k * pi / 8 - pi / 2;
+                    final r = k.isEven ? 26.0 : 11.0;
+                    final pt = Offset(c.dx + r * cos(a), c.dy + r * sin(a));
+                    if (k == 0) {
+                      path.moveTo(pt.dx, pt.dy);
+                    } else {
+                      path.lineTo(pt.dx, pt.dy);
+                    }
+                  }
+                  path.close();
+                  canvas.drawPath(path, p);
+                }
+              }
+            }
+
+            @override
+            bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+          }
+          BARBUT_EOF
+          cat > test/widget_test.dart <<'BARBUT_EOF'
+          import 'package:flutter_test/flutter_test.dart';
+          import 'package:barbut/game.dart';
+
+          void main() {
+            test('kazandıran atışlar', () {
+              for (final p in [[6, 6], [5, 5], [3, 3], [6, 5], [5, 6]]) {
+                expect(judge(p[0], p[1]), Outcome.win);
+              }
+            });
+            test('kaybettiren atışlar', () {
+              for (final p in [[1, 1], [2, 2], [4, 4], [1, 2], [2, 1]]) {
+                expect(judge(p[0], p[1]), Outcome.lose);
+              }
+            });
+            test('sonuçsuz atışlar', () {
+              for (final p in [[6, 1], [3, 4], [5, 2], [6, 4]]) {
+                expect(judge(p[0], p[1]), Outcome.pass);
+              }
+            });
+            test('akçe el değiştirir, zar rakibe geçer', () {
+              final g = Game();
+              g.apply(const Roll(6, 6, 0, Outcome.win, 10));
+              expect(g.akce, [110, 90]);
+              expect(g.turn, 1);
+            });
+          }
+          BARBUT_EOF
+          cat > tool/make_sounds.py <<'BARBUT_EOF'
+          """Barbut ses dosyalarını sıfırdan üretir (dosya indirmez, kayıt kullanmaz).
+
+          Çalıştırma:  python tool/make_sounds.py
+          Çıktı:       assets/sounds/*.wav  (44.1 kHz, mono, 16 bit)
+          """
+          import os
+          import wave
+          import numpy as np
+          from scipy.signal import butter, sosfilt, fftconvolve
+
+          SR = 44100
+          rng = np.random.default_rng(1453)
+          OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "sounds")
+          os.makedirs(OUT, exist_ok=True)
+
+          HICAZ = [293.66, 311.13, 369.99, 392.0, 440.0, 466.16, 523.25, 587.33]
+
+
+          def buf(sec):
+              return np.zeros(int(SR * sec))
+
+
+          def env(n, att, rel_curve=6.0):
+              """Hızlı yükselen, üstel sönen zarf."""
+              a = max(1, int(SR * att))
+              e = np.ones(n)
+              e[:a] = np.linspace(0, 1, a)
+              t = np.linspace(0, 1, n - a)
+              e[a:] = np.exp(-rel_curve * t)
+              return e
+
+
+          def band(x, lo, hi, order=2):
+              lo = max(20, lo)
+              hi = min(SR / 2 - 100, hi)
+              sos = butter(order, [lo, hi], btype="band", fs=SR, output="sos")
+              return sosfilt(sos, x)
+
+
+          def lowpass(x, f, order=2):
+              return sosfilt(butter(order, f, btype="low", fs=SR, output="sos"), x)
+
+
+          def highpass(x, f, order=2):
+              return sosfilt(butter(order, f, btype="high", fs=SR, output="sos"), x)
+
+
+          def add(dst, src, at, gain=1.0):
+              i = int(at * SR)
+              if i >= len(dst):
+                  return
+              n = min(len(src), len(dst) - i)
+              dst[i:i + n] += src[:n] * gain
+
+
+          def noise_burst(dur, f, q=2.0, att=0.002, curve=6.0):
+              n = int(SR * dur)
+              x = rng.uniform(-1, 1, n)
+              bw = f / q
+              return band(x, f - bw / 2, f + bw / 2) * env(n, att, curve) * 3
+
+
+          def sine(dur, f0, f1=None, att=0.005, curve=6.0, vib=0.0, vib_depth=0.0):
+              n = int(SR * dur)
+              t = np.arange(n) / SR
+              f = np.full(n, f0) if f1 is None else f0 * (f1 / f0) ** (t / dur)
+              if vib:
+                  f = f + np.sin(2 * np.pi * vib * t) * vib_depth
+              ph = 2 * np.pi * np.cumsum(f) / SR
+              return np.sin(ph) * env(n, att, curve)
+
+
+          def impulse_response(sec=3.0, decay=2.6):
+              n = int(SR * sec)
+              t = np.linspace(0, 1, n)
+              ir = rng.uniform(-1, 1, n) * (1 - t) ** decay
+              ir[: int(SR * 0.012)] *= np.linspace(0, 1, int(SR * 0.012))
+              ir = lowpass(ir, 5200)
+              return ir / np.sqrt(np.sum(ir ** 2))
+
+
+          IR = impulse_response()
+
+
+          def verb(dry, wet=0.45):
+              w = fftconvolve(dry, IR)[: len(dry)]
+              return dry + w * wet
+
+
+          def bone_click(gain=1.0, pitch=1.0):
+              """Kemik zarın sert yüzeye çarpması: tiz tık + kısa rezonans + gövde."""
+              x = buf(0.12)
+              add(x, noise_burst(0.045, 3100 * pitch + rng.uniform(-300, 300), q=2.2, curve=9), 0, 0.42)
+              add(x, sine(0.07, 1650 * pitch + rng.uniform(-150, 150), curve=8), 0, 0.12)
+              add(x, sine(0.06, 170, 90, curve=7), 0, 0.22)
+              return x * gain
+
+
+          def bell(dur, f, gain):
+              x = buf(dur)
+              for m, a in [(1, 1), (2.76, 0.45), (5.4, 0.22), (8.93, 0.1)]:
+                  add(x, sine(dur, f * m, att=0.003, curve=4.5 * (m * 0.6 + 0.4)), 0, gain * a)
+              return x
+
+
+          def gong(dur, f, gain):
+              x = buf(dur)
+              for m, a in [(1, 1), (1.47, 0.6), (2.09, 0.4), (2.56, 0.3), (3.3, 0.15)]:
+                  add(x, sine(dur, f * m, f * m * 0.985, att=0.02, curve=3.2), 0, gain * a)
+              add(x, lowpass(rng.uniform(-1, 1, int(SR * 0.25)), 600) * env(int(SR * 0.25), 0.002, 8), 0, 0.5 * gain)
+              return x
+
+
+          def ney(dur, f, gain):
+              x = buf(dur + 0.1)
+              add(x, lowpass(sine(dur, f, att=0.22, curve=3, vib=5.2, vib_depth=f * 0.012), 1800), 0, gain)
+              add(x, lowpass(sine(dur, f * 2, att=0.3, curve=3), 2400), 0, gain * 0.18)
+              n = int(SR * dur)
+              add(x, band(rng.uniform(-1, 1, n), f * 1.6, f * 2.6) * env(n, 0.2, 3) * 2, 0, gain * 0.25)
+              return x
+
+
+          def master(x, peak=0.89):
+              x = np.tanh(x * 1.2)  # yumuşak sıkıştırma
+              fade = int(SR * 0.03)
+              x[-fade:] *= np.linspace(1, 0, fade)
+              return x / (np.max(np.abs(x)) + 1e-9) * peak
+
+
+          def save(name, x, peak=0.89):
+              x = master(x, peak)
+              with wave.open(os.path.join(OUT, name), "wb") as w:
+                  w.setnchannels(1)
+                  w.setsampwidth(2)
+                  w.setframerate(SR)
+                  w.writeframes((x * 32767).astype(np.int16).tobytes())
+              print(name, f"{len(x) / SR:.2f}s")
+
+
+          # --- kupada tek tıkırtı (sallarken) ---
+          for i in range(1, 5):
+              x = buf(0.35)
+              for k in range(rng.integers(1, 3)):
+                  at = k * 0.022 + rng.uniform(0, 0.01)
+                  add(x, noise_burst(0.03, rng.uniform(2400, 4200), q=5, curve=10), at, 0.22)
+                  add(x, sine(0.04, rng.uniform(1000, 1600), curve=9), at, 0.06)
+              add(x, band(rng.uniform(-1, 1, len(x)), 900, 1700) * env(len(x), 0.01, 12), 0, 0.05)
+              save(f"tick_{i}.wav", verb(x, 0.25), peak=0.7)
+
+          # --- düğmeyle atış: def vuruşu + uğultu + kupada çalkalama (0.64 sn) ---
+          for i in range(1, 3):
+              x = buf(1.6)
+              for f, g, typ in [(55, 0.07, 0), (82.41, 0.07, 0), (110, 0.03, 1)]:
+                  s = sine(1.6, f, att=0.6, curve=2.5)
+                  add(x, lowpass(s, 400), 0, g)
+              add(x, sine(0.55, 150, 46, curve=5), 0, 0.75)
+              add(x, lowpass(rng.uniform(-1, 1, int(SR * 0.07)), 900) * env(int(SR * 0.07), 0.002, 8), 0, 0.35)
+              bed = band(rng.uniform(-1, 1, int(SR * 0.65)), 900, 1800) * env(int(SR * 0.65), 0.2, 3) * 2
+              add(x, bed, 0.05, 0.05)
+              for _ in range(16):
+                  at = 0.06 + rng.uniform(0, 0.58)
+                  add(x, noise_burst(0.03, rng.uniform(2400, 4200), q=5, curve=10), at, rng.uniform(0.18, 0.28))
+                  add(x, sine(0.04, rng.uniform(1000, 1600), curve=9), at, 0.05)
+              save(f"cup_{i}.wav", verb(x, 0.5))
+
+          # --- savruluş + tepside sekmeler (t=0 savruluş, ilk çarpma 0.22 sn) ---
+          HITS = [0.22, 0.46, 0.66, 0.80, 0.90, 0.96]
+          AMPS = [1, 0.7, 0.5, 0.34, 0.22, 0.12]
+          for i in range(1, 4):
+              x = buf(2.0)
+              n = int(SR * 0.3)
+              wh = rng.uniform(-1, 1, n)
+              sweep = np.zeros(n)
+              # basit süpürülen bant: parçalı filtre
+              seg = n // 8
+              for s in range(8):
+                  f = 400 * (3200 / 400) ** (s / 7)
+                  sweep[s * seg:(s + 1) * seg] = band(wh, f * 0.7, f * 1.3)[s * seg:(s + 1) * seg]
+              add(x, sweep * env(n, 0.12, 4) * 2, 0, 0.18)
+              for die, off in [(0, 0.0), (1, 0.035)]:
+                  for h, a in zip(HITS, AMPS):
+                      at = h + off + (rng.uniform(0, 0.02) if die else 0)
+                      add(x, bone_click(a, pitch=1.0 + die * 0.07 + rng.uniform(-0.05, 0.05)), at)
+              save(f"throw_{i}.wav", verb(x, 0.55))
+
+          # --- sonuç sesleri ---
+          x = buf(4.2)
+          for k, n in enumerate([0, 2, 3, 4, 7]):
+              add(x, bell(2.2, HICAZ[n] * 2, 0.09), k * 0.075)
+          add(x, bell(3.6, HICAZ[7] * 2, 0.12), 0.45)
+          add(x, gong(3.0, 98, 0.18), 0)
+          sh = highpass(rng.uniform(-1, 1, int(SR * 1.6)), 7000) * env(int(SR * 1.6), 0.3, 3)
+          add(x, sh, 0.4, 0.05)
+          save("win.wav", verb(x, 0.7))
+
+          x = buf(5.0)
+          add(x, gong(4.5, 61.7, 0.42), 0)
+          for k, n in enumerate([7, 6, 4, 2, 1, 0]):
+              add(x, ney(1.8 if k == 5 else 0.32, HICAZ[n] / 2, 0.11), 0.3 + k * 0.24)
+          save("lose.wav", verb(x, 0.8))
+
+          x = buf(2.6)
+          add(x, ney(1.1, HICAZ[4], 0.12), 0)
+          add(x, ney(1.3, HICAZ[3], 0.09), 0.55)
+          save("pass.wav", verb(x, 0.75), peak=0.75)
+
+          x = buf(6.0)
+          for k in range(8):
+              add(x, bell(1.8, HICAZ[k] * 2, 0.08), k * 0.09)
+          add(x, gong(5.0, 73.4, 0.35), 0.8)
+          add(x, bell(4.5, HICAZ[0] * 4, 0.1), 0.85)
+          save("final.wav", verb(x, 0.75))
+          BARBUT_EOF
+          ls -R lib test
+
+      - name: Sesleri üret
+        working-directory: barbut_app
+        run: |
+          pip install numpy scipy
+          python tool/make_sounds.py
 
       - name: Titreşim izni ve uygulama adı
+        working-directory: barbut_app
         run: |
           M=android/app/src/main/AndroidManifest.xml
           grep -q 'android.permission.VIBRATE' "$M" || \
             sed -i 's#<manifest xmlns:android="http://schemas.android.com/apk/res/android">#&\n    <uses-permission android:name="android.permission.VIBRATE"/>#' "$M"
           sed -i 's#android:label="barbut"#android:label="Barbut"#' "$M"
-          grep -n 'VIBRATE\|android:label' "$M"
 
-      - run: flutter pub get
+      - name: Paketleri indir
+        working-directory: barbut_app
+        run: flutter pub get
+
       - name: Kural testleri
+        working-directory: barbut_app
         run: flutter test
+
       - name: APK derle
+        working-directory: barbut_app
         run: flutter build apk --release
 
       - uses: actions/upload-artifact@v4
         with:
           name: barbut-android
-          path: build/app/outputs/flutter-apk/app-release.apk
-
-  ios:
-    name: iOS (imzasız kontrol)
-    if: github.event_name == 'workflow_dispatch' && inputs.ios
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-      - run: flutter create . --platforms=android,ios --org com.ercan --project-name barbut
-      - run: /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Barbut" ios/Runner/Info.plist
-      - run: flutter pub get
-      - run: flutter build ios --release --no-codesign
+          path: barbut_app/build/app/outputs/flutter-apk/app-release.apk
