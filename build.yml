@@ -1,0 +1,65 @@
+name: Uygulamayı derle
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ios:
+        description: "iOS derlemesini de dene (imzasız, yalnızca kontrol için)"
+        type: boolean
+        default: false
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Android/iOS klasörlerini oluştur
+        run: flutter create . --platforms=android,ios --org com.ercan --project-name barbut
+
+      - name: Titreşim izni ve uygulama adı
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.VIBRATE' "$M" || \
+            sed -i 's#<manifest xmlns:android="http://schemas.android.com/apk/res/android">#&\n    <uses-permission android:name="android.permission.VIBRATE"/>#' "$M"
+          sed -i 's#android:label="barbut"#android:label="Barbut"#' "$M"
+          grep -n 'VIBRATE\|android:label' "$M"
+
+      - run: flutter pub get
+      - name: Kural testleri
+        run: flutter test
+      - name: APK derle
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: barbut-android
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+  ios:
+    name: iOS (imzasız kontrol)
+    if: github.event_name == 'workflow_dispatch' && inputs.ios
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter create . --platforms=android,ios --org com.ercan --project-name barbut
+      - run: /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Barbut" ios/Runner/Info.plist
+      - run: flutter pub get
+      - run: flutter build ios --release --no-codesign
