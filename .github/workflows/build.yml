@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 7: gerçekçi hızda, doğal yuvarlanan zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 8: zar yalnızca fincanı devirir gibi atılır): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -1378,12 +1378,14 @@ jobs:
             double _panStartX = 0.5;
             // yerçekimi yönü (yumuşatılmış ivmeölçer): telefon nereye bakıyor?
             double _gx = 0, _gy = 0, _gz = 9.81;
+            // sarsıntı ölçüsü: ivmenin yerçekiminden (9,81) ne kadar saptığı, yumuşatılmış.
+            // Sallarken büyür, telefon sakin tutulurken sıfıra iner.
+            double _jolt = 0;
             double _downMs = 0;
             DateTime _releasedAt = DateTime.now();
             double _releaseStrength = 1;
             Timer? _timer;
             StreamSubscription<AccelerometerEvent>? _acc;
-            StreamSubscription<GyroscopeEvent>? _gyro;
 
             @override
             void initState() {
@@ -1397,7 +1399,6 @@ jobs:
             void dispose() {
               _ticker.dispose();
               _acc?.cancel();
-              _gyro?.cancel();
               _timer?.cancel();
               _frame.dispose();
               _guardUi(() => SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
@@ -1413,15 +1414,15 @@ jobs:
                 _acc = accelerometerEventStream(samplingPeriod: SensorInterval.gameInterval).listen(
                   (e) {
                     cup.setAccel(e.x, e.y, e.z);
-                    _gx += (e.x - _gx) * 0.2;
-                    _gy += (e.y - _gy) * 0.2;
-                    _gz += (e.z - _gz) * 0.2;
+                    // yavaş süzgeç: sallamanın ileri-geri itişleri birbirini götürür,
+                    // geriye yalnızca telefonun gerçekten nereye baktığı kalır
+                    _gx += (e.x - _gx) * 0.1;
+                    _gy += (e.y - _gy) * 0.1;
+                    _gz += (e.z - _gz) * 0.1;
+                    final mag = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+                    _jolt += ((mag - 9.81).abs() - _jolt) * 0.15;
                     if (!sensorsOk && mounted) setState(() => sensorsOk = true);
                   },
-                  onError: (Object e, StackTrace s) => ErrorLog.add(e, s),
-                );
-                _gyro = gyroscopeEventStream(samplingPeriod: SensorInterval.gameInterval).listen(
-                  _onGyro,
                   onError: (Object e, StackTrace s) => ErrorLog.add(e, s),
                 );
               } catch (e, s) {
@@ -1440,21 +1441,6 @@ jobs:
                   diceOnTable = false;
                   verdictOn = false;
                 });
-              }
-            }
-
-            void _onGyro(GyroscopeEvent e) {
-              if (phase != Phase.holding || game.over) return;
-              if (DateTime.now().difference(_phaseStart).inMilliseconds < 700) return;
-              // fincanı devirir gibi bilek silkelemesi: telefonun yatay ekseni etrafında hızlı dönüş
-              final flick = e.x.abs();
-              if (flick > 7 && cup.hardHits >= 1) {
-                final bias = cup.biasX;
-                _throw(
-                  strength: (flick / 12).clamp(0.6, 1.4),
-                  startX: 0.5 + (bias * 0.15).clamp(-0.25, 0.25),
-                  dirX: (bias * 0.3).clamp(-0.5, 0.5),
-                );
               }
             }
 
@@ -1502,9 +1488,14 @@ jobs:
               if (phase == Phase.holding) {
                 cup.step(dt);
                 // dökme hareketi: telefonun üst ucu aşağı bakıyor ya da ekran yere dönük
-                final pointingDown = _gy < -3.5 || _gz < -4.0;
-                _downMs = pointingDown ? _downMs + dt * 1000 : 0;
-                if (_downMs > 60 && DateTime.now().difference(_phaseStart).inMilliseconds > 500) {
+                // Zarları yalnızca fincanı devirir gibi telefonu aşağı çevirmek atar;
+                // ne kadar sallanırsa sallansın, sallamak tek başına zar atmaz.
+                // Koşul: telefonun ucu ya da ekranı yere dönük VE telefon o an sarsılmıyor,
+                // ve bu durum kısa bir an (150 ms) sürüyor.
+                final pointingDown = _gy < -4.0 || _gz < -4.5;
+                final steady = _jolt < 3.0;
+                _downMs = pointingDown && steady ? _downMs + dt * 1000 : 0;
+                if (_downMs > 150 && DateTime.now().difference(_phaseStart).inMilliseconds > 500) {
                   _downMs = 0;
                   _release();
                 }
@@ -1601,6 +1592,8 @@ jobs:
                     behavior: HitTestBehavior.opaque,
                     onPanStart: (d) => _panStartX = d.localPosition.dx / size.width,
                     onPanEnd: (d) {
+                      // ekranda kaydırarak atış yalnızca hareket algılayıcısı olmayan telefonlarda
+                      if (sensorsOk) return;
                       final v = d.velocity.pixelsPerSecond;
                       if (v.dy < -400) {
                         _throw(
@@ -1784,8 +1777,8 @@ jobs:
               } else if (!sensorsOk) {
                 hint = 'Atmak için ekranda aşağıdan yukarı kaydır.';
               } else if (throws < 2) {
-                hint = '$vessel. Telefonu salla, sonra ucunu masaya doğru çevir: zarları döker gibi.\n'
-                    'Ya da ekranda aşağıdan yukarı kaydır.';
+                hint = '$vessel. İstediğin kadar salla; atmak için telefonun ucunu '
+                    'fincanı devirir gibi masaya doğru çevir.';
               } else {
                 hint = vessel;
               }
