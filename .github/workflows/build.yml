@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 6: düşen zar, son atış şeridi, sıra göstergesi): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 7: gerçekçi hızda, doğal yuvarlanan zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -767,14 +767,20 @@ jobs:
           }
 
           class TableSim {
-            TableSim(this.size, {required this.onHit});
+            TableSim(this.size, {required this.onHit, Random? rng}) : _rng = rng ?? Random();
 
             Size size;
             final HitFn onHit;
             final List<TableDie> dice = [TableDie(), TableDie()];
-            final _rng = Random();
-            double _t = 0;
+            Random _rng;
+            double _t = 0, _acc = 0;
             bool active = false;
+
+            /// Sabit adım: aynı tohumla yapılan prova ve gerçek atış birebir aynı yolu izler.
+            static const _h = 1 / 240;
+
+            /// Her atışta denenen olası fırlatış sayısı; içlerinden en doğal görüneni oynatılır.
+            static const _candidates = 16;
 
             static const rail = 18.0;
 
@@ -786,7 +792,7 @@ jobs:
 
             double get s => min(size.width, size.height) * 0.16; // zar boyu
             double get _g => s * 60; // yerçekimi (px/s²)
-            double get _friction => s * 17; // yuvarlanma sürtünmesi (px/s²)
+            double get _friction => s * 9; // yuvarlanma sürtünmesi (px/s²)
 
             double _pan(double x) => (x / size.width * 2 - 1).clamp(-1.0, 1.0);
 
@@ -802,11 +808,43 @@ jobs:
 
             /// [strength] 0.5..1.4, [startX] 0..1 ekran genişliğine göre,
             /// [dirX] -0.6..0.6 sağa/sola sapma. [falls]: hangi zar masadan düşecek.
+            ///
+            /// Önce birkaç olası fırlatış görünmeden sonuna kadar denenir; zarları masanın
+            /// rastgele seçilen bir yerine en doğal şekilde götüren oynatılır. Böylece her
+            /// atış hızlı ve canlı olur ama zarlar hep aynı köşede toplanmaz, kenara yapışmaz.
+            /// Sonuç (gelen sayılar) bundan etkilenmez: o zaten [targets] ile belli.
             void launch(List<int> targets, double strength, double startX, double dirX,
                 {List<bool> falls = const [false, false]}) {
+              final tx = 0.2 + 0.6 * _rng.nextDouble(), ty = 0.15 + 0.7 * _rng.nextDouble();
+              var bestSeed = 0;
+              var bestScore = double.infinity;
+              for (var k = 0; k < _candidates; k++) {
+                final seed = _rng.nextInt(1 << 30);
+                final probe = TableSim(size, onHit: _silent, rng: Random(seed))
+                  ..topInset = topInset
+                  ..bottomInset = bottomInset;
+                probe._start(targets, strength, startX, dirX, falls);
+                probe._runToEnd();
+                final sc = probe._score(tx, ty);
+                if (sc < bestScore) {
+                  bestScore = sc;
+                  bestSeed = seed;
+                }
+              }
+              _rng = Random(bestSeed);
+              _start(targets, strength, startX, dirX, falls);
+            }
+
+            static void _silent(HitKind kind, double strength, double pan) {}
+
+            void _start(List<int> targets, double strength, double startX, double dirX, List<bool> falls) {
               _t = 0;
+              _acc = 0;
               active = true;
               final w = size.width, h = size.height;
+              // her deneme biraz farklı: el hiçbir zaman iki kez aynı atmaz
+              final st = strength * (0.7 + 0.45 * _rng.nextDouble());
+              final dx = dirX + (_rng.nextDouble() - 0.5) * 0.3;
               for (var i = 0; i < dice.length; i++) {
                 final d = dice[i];
                 d.target = targets[i];
@@ -821,28 +859,62 @@ jobs:
                 d.side = i == 0 ? -1.0 : 1.0;
                 d.x = w * startX.clamp(0.25, 0.75) + (i == 0 ? -1 : 1) * s * 0.75;
                 d.y = h + s * 0.6;
-                // Hız, zarlar masanın ortasında duracak şekilde ayarlı (eskisi üst kenara yapıştırıyordu).
-                final speed = h * (0.5 + 0.35 * strength) * (0.9 + 0.2 * _rng.nextDouble());
+                // gerçek bir atış hızı: zarlar karşı kenara çarpıp geri döner
+                final speed = h * (1.2 + 0.55 * st) * (0.85 + 0.3 * _rng.nextDouble());
                 final ang = d.falls
-                    ? d.side * (0.3 + 0.15 * _rng.nextDouble()) // yana doğru, kenardan aşacak
-                    : dirX * 0.8 + (_rng.nextDouble() - 0.5) * 0.4;
+                    ? d.side * (0.2 + 0.12 * _rng.nextDouble()) // yana doğru, kenardan aşacak
+                    : dx * 0.8 + (_rng.nextDouble() - 0.5) * 0.5;
                 d.vx = speed * sin(ang);
                 d.vy = -speed * cos(ang);
                 d.z = s * 0.9;
-                d.vz = s * (7 + 4 * strength) * (0.85 + 0.3 * _rng.nextDouble());
+                d.vz = s * (7 + 4 * st) * (0.85 + 0.3 * _rng.nextDouble());
                 d.spin = 14 + 12 * _rng.nextDouble();
                 d.heading = atan2(d.vy, d.vx);
                 d.visHeading = d.heading;
               }
             }
 
+            void _runToEnd() {
+              while (_t < 8 && !allSettled) {
+                _t += _h;
+                _sub(_h);
+              }
+              _forceEnd();
+            }
+
+            /// Denemenin ne kadar doğal bittiğinin puanı (küçük = iyi).
+            double _score(double tx, double ty) {
+              final on = dice.where((d) => !d.fallen).toList();
+              if (on.isEmpty) return 0;
+              final w = size.width;
+              final top = max(rail, topInset), bottom = size.height - max(rail, bottomInset);
+              final area = max(1.0, bottom - top);
+              final cx = on.map((d) => d.x).reduce((a, b) => a + b) / on.length / w;
+              final cy = (on.map((d) => d.y).reduce((a, b) => a + b) / on.length - top) / area;
+              final ex = cx - tx, ey = (cy - ty) * area / w;
+              var sc = sqrt(ex * ex + ey * ey) * 3; // hedef noktaya uzaklık
+              final edge = s * 0.75;
+              for (final d in on) {
+                // kenara yaslanmış zar doğal durmaz
+                if (d.y - top < edge || bottom - d.y < edge || d.x < rail + edge || d.x > w - rail - edge) sc += 0.6;
+              }
+              if (_t < 1.0) sc += (1.0 - _t) * 3; // çok çabuk duran atış cansız görünür
+              if (_t > 3.5) sc += _t - 3.5;
+              return sc;
+            }
+
             void step(double dt) {
               if (!active) return;
-              _t += dt;
-              const n = 3;
-              for (var i = 0; i < n; i++) {
-                _sub(dt / n);
+              _acc += dt;
+              while (_acc >= _h) {
+                _acc -= _h;
+                _t += _h;
+                _sub(_h);
               }
+              _forceEnd();
+            }
+
+            void _forceEnd() {
               if (_t > 8 && !allSettled) {
                 for (final d in dice) {
                   if (d.falls) {
@@ -861,6 +933,13 @@ jobs:
                     ..settled = true;
                 }
               }
+            }
+
+            void _turn(TableDie d, double a) {
+              final c = cos(a), sn = sin(a);
+              final vx = d.vx * c - d.vy * sn;
+              d.vy = d.vx * sn + d.vy * c;
+              d.vx = vx;
             }
 
             void _sub(double dt) {
@@ -904,10 +983,13 @@ jobs:
                   if (d.z <= 0) {
                     d.z = 0;
                     final impact = -d.vz;
-                    d.vz = impact > s * 2.5 ? impact * 0.36 : 0.0;
-                    d.vx *= 0.8;
-                    d.vy *= 0.8;
-                    sp *= 0.8;
+                    final hard = impact > s * 2.5;
+                    d.vz = hard ? impact * 0.4 : 0.0;
+                    final keep = hard ? 0.82 : 0.93; // sert düşüşte çok, küçük sekmede az enerji kaybı
+                    d.vx *= keep;
+                    d.vy *= keep;
+                    sp *= keep;
+                    _turn(d, (_rng.nextDouble() - 0.5) * 0.5); // köşesine düşen zar yön değiştirir
                     d.spin = sp / s * (pi / 2) + 6;
                     onHit(HitKind.table, (impact / (s * 13)).clamp(0.0, 1.0), _pan(d.x));
                   }
@@ -931,6 +1013,7 @@ jobs:
                   if (!airborne && d.z == 0) {
                     onHit(HitKind.tick, (sp / (s * 22)).clamp(0.06, 0.6), _pan(d.x));
                     if (sp > s * 5) d.vz = sp * 0.05; // hızlı yuvarlanırken küçük sıçrama
+                    _turn(d, (_rng.nextDouble() - 0.5) * 0.15); // her devrilmede hafif sapma
                   }
                 }
 
@@ -948,28 +1031,32 @@ jobs:
                   d.x = minX;
                   if (d.vx < 0) {
                     onHit(HitKind.rail, (-d.vx / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
-                    d.vx = -d.vx * 0.5;
+                    d.vy += (_rng.nextDouble() - 0.5) * d.vx.abs() * 0.5;
+                    d.vx = -d.vx * 0.6;
                   }
                 }
                 if (!d.falls && d.x > maxX) {
                   d.x = maxX;
                   if (d.vx > 0) {
                     onHit(HitKind.rail, (d.vx / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
-                    d.vx = -d.vx * 0.5;
+                    d.vy += (_rng.nextDouble() - 0.5) * d.vx.abs() * 0.5;
+                    d.vx = -d.vx * 0.6;
                   }
                 }
                 if (d.y < minY) {
                   d.y = minY;
                   if (d.vy < 0) {
                     onHit(HitKind.rail, (-d.vy / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
-                    d.vy = -d.vy * 0.5;
+                    d.vx += (_rng.nextDouble() - 0.5) * d.vy.abs() * 0.5;
+                    d.vy = -d.vy * 0.6;
                   }
                 }
                 if (d.entered && d.y > maxY) {
                   d.y = maxY;
                   if (d.vy > 0) {
                     onHit(HitKind.rail, (d.vy / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
-                    d.vy = -d.vy * 0.5;
+                    d.vx += (_rng.nextDouble() - 0.5) * d.vy.abs() * 0.5;
+                    d.vy = -d.vy * 0.6;
                   }
                 }
 
