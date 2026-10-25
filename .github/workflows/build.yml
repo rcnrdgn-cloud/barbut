@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 3: avuç/fincan modu): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 5: dökerek atış): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -48,7 +48,7 @@ jobs:
           dependencies:
             flutter:
               sdk: flutter
-            audioplayers: ^6.1.0
+            flutter_soloud: ">=2.1.0 <4.0.0"
             sensors_plus: ^6.1.0
             vibration: ">=2.0.0 <4.0.0"
 
@@ -73,6 +73,7 @@ jobs:
           import 'hand_feel.dart';
           import 'hand_screen.dart';
           import 'palette.dart';
+          import 'sound.dart';
 
           void main() {
             runZonedGuarded(() async {
@@ -83,6 +84,11 @@ jobs:
               };
               try {
                 await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+              try {
+                await SoundEngine.I.init().timeout(const Duration(seconds: 8));
               } catch (e, s) {
                 ErrorLog.add(e, s);
               }
@@ -132,6 +138,7 @@ jobs:
             static void add(Object error, [StackTrace? stack]) {
               final first = error.toString().split('\n').first;
               final where = (stack?.toString() ?? '').split('\n').where((l) => l.trim().isNotEmpty).take(3).join('\n');
+              if (items.value.any((x) => x.startsWith(first))) return; // aynı hatayı tekrar yazma
               final list = [...items.value, where.isEmpty ? first : '$first\n$where'];
               items.value = list.length > 5 ? list.sublist(list.length - 5) : list;
               debugPrint('BARBUT HATA: $error\n$stack');
@@ -242,17 +249,69 @@ jobs:
             }
           }
           BARBUT_EOF
+          cat > lib/sound.dart <<'BARBUT_EOF'
+          import 'dart:async';
+
+          import 'package:flutter_soloud/flutter_soloud.dart';
+
+          import 'errors.dart';
+
+          /// Oyun sesi motoru (SoLoud): kısa sesleri gecikmesiz, üst üste ve
+          /// sağ/sol yönlü çalar. Bütün sesler açılışta belleğe yüklenir.
+          class SoundEngine {
+            SoundEngine._();
+            static final SoundEngine I = SoundEngine._();
+
+            static const names = [
+              'clack_1', 'clack_2', 'cup_1', 'cup_2', 'cup_hit_1', 'cup_hit_2', 'cup_hit_3', 'cup_hit_4',
+              'final', 'lose', 'palm_1', 'palm_2', 'palm_3', 'palm_4', 'pass', 'rail_1', 'rail_2',
+              'release', 'table_hit_1', 'table_hit_2', 'table_hit_3', 'table_hit_4', 'table_tick_1',
+              'table_tick_2', 'table_tick_3', 'throw_1', 'throw_2', 'throw_3', 'tick_1', 'tick_2',
+              'tick_3', 'tick_4', 'win',
+            ];
+
+            final Map<String, AudioSource> _sources = {};
+            bool get ready => _sources.isNotEmpty;
+
+            Future<void> init() async {
+              try {
+                await SoLoud.instance.init();
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+                return;
+              }
+              for (final n in names) {
+                try {
+                  _sources[n] = await SoLoud.instance.loadAsset('assets/sounds/$n.wav');
+                } catch (e, s) {
+                  ErrorLog.add(e, s);
+                }
+              }
+            }
+
+            /// [pan]: -1 sol, 0 orta, 1 sağ.
+            void play(String name, {double volume = 1, double pan = 0}) {
+              final src = _sources[name];
+              if (src == null) return;
+              Future.sync(() => SoLoud.instance.play(
+                    src,
+                    volume: volume.clamp(0.0, 1.0),
+                    pan: pan.clamp(-1.0, 1.0),
+                  )).then((_) {}, onError: (Object e, StackTrace s) => ErrorLog.add(e, s));
+            }
+          }
+          BARBUT_EOF
           cat > lib/feel.dart <<'BARBUT_EOF'
           import 'dart:async';
           import 'dart:io' show Platform;
           import 'dart:math';
 
-          import 'package:audioplayers/audioplayers.dart';
           import 'package:flutter/services.dart';
           import 'package:vibration/vibration.dart';
 
           import 'errors.dart';
           import 'game.dart';
+          import 'sound.dart';
 
           typedef _IosHaptic = Future<void> Function();
 
@@ -273,25 +332,12 @@ jobs:
             bool hapticsOn = true;
 
             final _rng = Random();
-            List<AudioPlayer> _ticks = [];
-            int _tickIndex = 0;
-            AudioPlayer? _cup, _throw, _result, _final;
             final List<Timer> _timers = [];
 
             bool _canVibrate = false;
             bool _amplitude = false;
 
             Future<void> init() async {
-              try {
-                _ticks = List.generate(4, (_) => AudioPlayer());
-                _cup = AudioPlayer();
-                _throw = AudioPlayer();
-                _result = AudioPlayer();
-                _final = AudioPlayer();
-              } catch (e, s) {
-                soundOn = false;
-                ErrorLog.add(e, s);
-              }
               try {
                 _canVibrate = (await Vibration.hasVibrator()) == true;
                 _amplitude = (await Vibration.hasAmplitudeControl()) == true;
@@ -318,14 +364,9 @@ jobs:
             void _at(int ms, void Function() fn) =>
                 _timers.add(Timer(Duration(milliseconds: ms), fn));
 
-            Future<void> _play(AudioPlayer? p, String asset,
-                {double volume = 1, PlayerMode mode = PlayerMode.mediaPlayer}) async {
-              if (!soundOn || p == null) return;
-              final AudioPlayer player = p;
-              try {
-                await player.stop();
-              } catch (_) {}
-              await _guard(() => player.play(AssetSource(asset), volume: volume, mode: mode));
+            void _play(String name, {double volume = 1}) {
+              if (!soundOn) return;
+              SoundEngine.I.play(name, volume: volume);
             }
 
             /// Tek bir titreşim darbesi. Android'de süre + güç (1-255),
@@ -345,9 +386,7 @@ jobs:
 
             /// Telefon sallanırken zarın kupada çarpması.
             void tick(double power) {
-              final p = _ticks.isEmpty ? null : _ticks[_tickIndex++ % _ticks.length];
-              _play(p, 'sounds/tick_${1 + _rng.nextInt(4)}.wav',
-                  volume: (0.45 + power / 40).clamp(0.4, 1.0), mode: PlayerMode.lowLatency);
+              _play('tick_${1 + _rng.nextInt(4)}', volume: (0.45 + power / 40).clamp(0.4, 1.0));
               _hit(14, (70 + power * 5).round().clamp(60, 200), HapticFeedback.selectionClick);
             }
 
@@ -356,14 +395,14 @@ jobs:
               final t0 = fromShake ? 0 : cupMs;
 
               if (!fromShake) {
-                _play(_cup, 'sounds/cup_${1 + _rng.nextInt(2)}.wav');
+                _play('cup_${1 + _rng.nextInt(2)}');
                 _at(0, () => _hit(55, 255, HapticFeedback.heavyImpact));
                 for (final t in const [90, 160, 215, 300, 355, 430, 490, 570, 625]) {
                   _at(t, () => _hit(16, 110, HapticFeedback.selectionClick));
                 }
               }
 
-              _at(t0, () => _play(_throw, 'sounds/throw_${1 + _rng.nextInt(3)}.wav'));
+              _at(t0, () => _play('throw_${1 + _rng.nextInt(3)}'));
 
               // tepsiye çarpmalar: [zaman, süre, güç]
               const bounces = [
@@ -394,10 +433,10 @@ jobs:
 
             void _scheduleResult(int tr, Outcome out, bool finalRoll) {
               _at(tr, () {
-                _play(_result, switch (out) {
-                  Outcome.win => 'sounds/win.wav',
-                  Outcome.lose => 'sounds/lose.wav',
-                  Outcome.pass => 'sounds/pass.wav',
+                _play(switch (out) {
+                  Outcome.win => 'win',
+                  Outcome.lose => 'lose',
+                  Outcome.pass => 'pass',
                 });
               });
               switch (out) {
@@ -413,7 +452,7 @@ jobs:
                   _at(tr, () => _hit(18, 90, HapticFeedback.lightImpact));
               }
               if (finalRoll) {
-                _at(tr + 2400, () => _play(_final, 'sounds/final.wav'));
+                _at(tr + 2400, () => _play('final'));
                 for (final d in const [0, 90, 180, 270, 900]) {
                   _at(tr + 2400 + d, () => _hit(d == 900 ? 200 : 25, 255, HapticFeedback.heavyImpact));
                 }
@@ -425,13 +464,13 @@ jobs:
           import 'dart:io' show Platform;
           import 'dart:math';
 
-          import 'package:audioplayers/audioplayers.dart';
           import 'package:flutter/services.dart';
           import 'package:vibration/vibration.dart';
 
           import 'errors.dart';
           import 'feel.dart';
           import 'physics.dart';
+          import 'sound.dart';
 
           /// Her tek çarpmanın sesi ve titreşimi; sertliği çarpmanın hızıyla orantılı.
           class ImpactFeel {
@@ -439,18 +478,11 @@ jobs:
             static final ImpactFeel I = ImpactFeel._();
 
             final _rng = Random();
-            List<AudioPlayer> _pool = [];
-            int _index = 0;
             bool _canVibrate = false, _amplitude = false;
             DateTime _lastHaptic = DateTime(0), _lastSound = DateTime(0);
             double _lastStrength = 0;
 
             Future<void> init() async {
-              try {
-                _pool = List.generate(8, (_) => AudioPlayer());
-              } catch (e, s) {
-                ErrorLog.add(e, s);
-              }
               try {
                 _canVibrate = (await Vibration.hasVibrator()) == true;
                 _amplitude = (await Vibration.hasAmplitudeControl()) == true;
@@ -467,16 +499,14 @@ jobs:
               }
             }
 
-            String _pick(String base, int count) => 'sounds/${base}_${1 + _rng.nextInt(count)}.wav';
+            String _pick(String base, int count) => '${base}_${1 + _rng.nextInt(count)}';
 
-            void _sound(String asset, double volume) {
-              if (!Feel.I.soundOn || _pool.isEmpty) return;
+            void _sound(String name, double volume, double pan) {
+              if (!Feel.I.soundOn) return;
               final now = DateTime.now();
-              final gap = now.difference(_lastSound).inMilliseconds;
-              if (gap < 12 || (gap < 24 && volume < 0.8)) return; // telefonun ses motorunu boğmamak için
+              if (now.difference(_lastSound).inMilliseconds < 8 && volume < 0.6) return;
               _lastSound = now;
-              final p = _pool[_index++ % _pool.length];
-              _guard(() => p.play(AssetSource(asset), volume: volume.clamp(0.05, 1.0), mode: PlayerMode.lowLatency));
+              SoundEngine.I.play(name, volume: volume, pan: pan * 0.7);
             }
 
             void _haptic(double strength, {int baseMs = 10}) {
@@ -506,35 +536,35 @@ jobs:
             }
 
             /// Zarlar elde / fincanda.
-            void cup(HitKind kind, double s, {required bool palm}) {
+            void cup(HitKind kind, double s, double pan, {required bool palm}) {
               if (kind == HitKind.dice) {
-                _sound(_pick('clack', 2), 0.2 + 0.7 * s);
+                _sound(_pick('clack', 2), 0.2 + 0.7 * s, pan);
                 _haptic(s * 0.8, baseMs: 6);
                 return;
               }
               if (palm) {
-                _sound(_pick('palm', 4), 0.25 + 0.75 * s);
+                _sound(_pick('palm', 4), 0.25 + 0.75 * s, pan);
                 _haptic(s * 0.85, baseMs: 14);
               } else {
-                _sound(_pick('cup_hit', 4), 0.2 + 0.8 * s);
+                _sound(_pick('cup_hit', 4), 0.2 + 0.8 * s, pan);
                 _haptic(s, baseMs: 8);
               }
             }
 
             /// Zarlar masada.
-            void table(HitKind kind, double s) {
+            void table(HitKind kind, double s, double pan) {
               switch (kind) {
                 case HitKind.table:
-                  _sound(_pick('table_hit', 4), 0.25 + 0.75 * s);
+                  _sound(_pick('table_hit', 4), 0.25 + 0.75 * s, pan);
                   _haptic(s, baseMs: 12);
                 case HitKind.tick:
-                  _sound(_pick('table_tick', 3), 0.15 + 0.6 * s);
+                  _sound(_pick('table_tick', 3), 0.15 + 0.6 * s, pan);
                   _haptic(s * 0.6, baseMs: 6);
                 case HitKind.rail:
-                  _sound(_pick('rail', 2), 0.25 + 0.75 * s);
+                  _sound(_pick('rail', 2), 0.25 + 0.75 * s, pan);
                   _haptic(s, baseMs: 14);
                 case HitKind.dice:
-                  _sound(_pick('clack', 2), 0.25 + 0.75 * s);
+                  _sound(_pick('clack', 2), 0.25 + 0.75 * s, pan);
                   _haptic(s * 0.8, baseMs: 6);
                 case HitKind.settle:
                   _haptic(0.15, baseMs: 6);
@@ -545,7 +575,7 @@ jobs:
             }
 
             void release(double strength) {
-              _sound('sounds/release.wav', 0.45 + 0.4 * strength.clamp(0.0, 1.0));
+              _sound('release', 0.45 + 0.4 * strength.clamp(0.0, 1.0), 0);
               _haptic(0.45, baseMs: 8);
             }
           }
@@ -556,8 +586,8 @@ jobs:
 
           enum HitKind { wall, floor, dice, table, tick, rail, settle }
 
-          /// [strength] 0..1 arası: çarpmanın ne kadar sert olduğu.
-          typedef HitFn = void Function(HitKind kind, double strength);
+          /// [strength] 0..1 arası: çarpmanın ne kadar sert olduğu. [pan]: -1 sol, 1 sağ.
+          typedef HitFn = void Function(HitKind kind, double strength, double pan);
 
           /* =====================================================================
            *  ELDEKİ ZARLAR
@@ -643,7 +673,7 @@ jobs:
                   if (vn > 0) {
                     p.vx -= (1 + e) * vn * nx;
                     p.vy -= (1 + e) * vn * ny;
-                    _hit(HitKind.wall, vn);
+                    _hit(HitKind.wall, vn, p.x / radius);
                   }
                 }
                 if (p.z < die) {
@@ -651,7 +681,7 @@ jobs:
                   if (p.vz < 0) {
                     final vn = -p.vz;
                     p.vz = vn < 0.05 ? 0.0 : vn * e;
-                    _hit(HitKind.floor, vn);
+                    _hit(HitKind.floor, vn, p.x / radius);
                   }
                 }
                 if (p.z > height - die) {
@@ -659,7 +689,7 @@ jobs:
                   if (p.vz > 0) {
                     final vn = p.vz;
                     p.vz = vn < 0.05 ? 0.0 : -vn * e;
-                    _hit(HitKind.floor, vn);
+                    _hit(HitKind.floor, vn, p.x / radius);
                   }
                 }
               }
@@ -687,15 +717,15 @@ jobs:
                   b.vx += j * nx;
                   b.vy += j * ny;
                   b.vz += j * nz;
-                  _hit(HitKind.dice, -rel);
+                  _hit(HitKind.dice, -rel, (a.x + b.x) / 2 / radius);
                 }
               }
             }
 
-            void _hit(HitKind kind, double vn) {
+            void _hit(HitKind kind, double vn, double pan) {
               if (vn < 0.07) return;
               if (vn > 0.7) hardHits++; // gerçekten sallandı
-              onHit(kind, (vn / 1.6).clamp(0.0, 1.0));
+              onHit(kind, (vn / 1.6).clamp(0.0, 1.0), pan.clamp(-1.0, 1.0));
             }
           }
 
@@ -744,6 +774,8 @@ jobs:
             double get s => min(size.width, size.height) * 0.16; // zar boyu
             double get _g => s * 60; // yerçekimi (px/s²)
             double get _friction => s * 17; // yuvarlanma sürtünmesi (px/s²)
+
+            double _pan(double x) => (x / size.width * 2 - 1).clamp(-1.0, 1.0);
 
             bool get allSettled => active && dice.every((d) => d.settled);
 
@@ -829,7 +861,7 @@ jobs:
                     d.vy *= 0.8;
                     sp *= 0.8;
                     d.spin = sp / s * (pi / 2) + 6;
-                    onHit(HitKind.table, (impact / (s * 13)).clamp(0.0, 1.0));
+                    onHit(HitKind.table, (impact / (s * 13)).clamp(0.0, 1.0), _pan(d.x));
                   }
                 } else if (sp > 0) {
                   final ns = max(0.0, sp - _friction * dt);
@@ -849,7 +881,7 @@ jobs:
                   final slow = sp < s * 3.5;
                   d.next = _chooseNext(d, slow);
                   if (!airborne && d.z == 0) {
-                    onHit(HitKind.tick, (sp / (s * 22)).clamp(0.06, 0.6));
+                    onHit(HitKind.tick, (sp / (s * 22)).clamp(0.06, 0.6), _pan(d.x));
                     if (sp > s * 5) d.vz = sp * 0.05; // hızlı yuvarlanırken küçük sıçrama
                   }
                 }
@@ -859,28 +891,28 @@ jobs:
                 if (d.x < minX) {
                   d.x = minX;
                   if (d.vx < 0) {
-                    onHit(HitKind.rail, (-d.vx / (s * 25)).clamp(0.0, 1.0));
+                    onHit(HitKind.rail, (-d.vx / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
                     d.vx = -d.vx * 0.5;
                   }
                 }
                 if (d.x > maxX) {
                   d.x = maxX;
                   if (d.vx > 0) {
-                    onHit(HitKind.rail, (d.vx / (s * 25)).clamp(0.0, 1.0));
+                    onHit(HitKind.rail, (d.vx / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
                     d.vx = -d.vx * 0.5;
                   }
                 }
                 if (d.y < minY) {
                   d.y = minY;
                   if (d.vy < 0) {
-                    onHit(HitKind.rail, (-d.vy / (s * 25)).clamp(0.0, 1.0));
+                    onHit(HitKind.rail, (-d.vy / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
                     d.vy = -d.vy * 0.5;
                   }
                 }
                 if (d.entered && d.y > maxY) {
                   d.y = maxY;
                   if (d.vy > 0) {
-                    onHit(HitKind.rail, (d.vy / (s * 25)).clamp(0.0, 1.0));
+                    onHit(HitKind.rail, (d.vy / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
                     d.vy = -d.vy * 0.5;
                   }
                 }
@@ -898,7 +930,7 @@ jobs:
                     if (d.phi < 0.004) {
                       d.phi = 0;
                       d.settled = true;
-                      onHit(HitKind.settle, 0.15);
+                      onHit(HitKind.settle, 0.15, _pan(d.x));
                     }
                   }
                 }
@@ -930,7 +962,7 @@ jobs:
                     b.vy += j * ny;
                     if (a.settled && j.abs() > 1) a.settled = false;
                     if (b.settled && j.abs() > 1) b.settled = false;
-                    onHit(HitKind.dice, (-rel / (s * 20)).clamp(0.0, 1.0));
+                    onHit(HitKind.dice, (-rel / (s * 20)).clamp(0.0, 1.0), _pan((a.x + b.x) / 2));
                   }
                 }
               }
@@ -1151,7 +1183,7 @@ jobs:
           import 'table_screen.dart';
           import 'table_view.dart';
 
-          enum Phase { holding, flying, result }
+          enum Phase { holding, released, flying, result }
 
           /// Telefon avuç/fincan; ekran sadece zarların düşeceği masa.
           class HandScreen extends StatefulWidget {
@@ -1177,6 +1209,11 @@ jobs:
             int throws = 0;
             DateTime _phaseStart = DateTime.now();
             double _panStartX = 0.5;
+            // yerçekimi yönü (yumuşatılmış ivmeölçer): telefon nereye bakıyor?
+            double _gx = 0, _gy = 0, _gz = 9.81;
+            double _downMs = 0;
+            DateTime _releasedAt = DateTime.now();
+            double _releaseStrength = 1;
             Timer? _timer;
             StreamSubscription<AccelerometerEvent>? _acc;
             StreamSubscription<GyroscopeEvent>? _gyro;
@@ -1209,6 +1246,9 @@ jobs:
                 _acc = accelerometerEventStream(samplingPeriod: SensorInterval.gameInterval).listen(
                   (e) {
                     cup.setAccel(e.x, e.y, e.z);
+                    _gx += (e.x - _gx) * 0.2;
+                    _gy += (e.y - _gy) * 0.2;
+                    _gz += (e.z - _gz) * 0.2;
                     if (!sensorsOk && mounted) setState(() => sensorsOk = true);
                   },
                   onError: (Object e, StackTrace s) => ErrorLog.add(e, s),
@@ -1224,10 +1264,10 @@ jobs:
 
             /* ---------------- elde ---------------- */
 
-            void _onCupHit(HitKind kind, double s) {
+            void _onCupHit(HitKind kind, double s, double pan) {
               if (phase != Phase.holding || game.over) return;
-              ImpactFeel.I.cup(kind, s, palm: cup.palm);
-              if (diceOnTable && s > 0.25) {
+              ImpactFeel.I.cup(kind, s, pan, palm: cup.palm);
+              if (diceOnTable && s > 0.2) {
                 // zarları masadan aldı: sıradaki atış başlıyor
                 setState(() {
                   diceOnTable = false;
@@ -1241,7 +1281,7 @@ jobs:
               if (DateTime.now().difference(_phaseStart).inMilliseconds < 700) return;
               // fincanı devirir gibi bilek silkelemesi: telefonun yatay ekseni etrafında hızlı dönüş
               final flick = e.x.abs();
-              if (flick > 8 && cup.hardHits >= 2) {
+              if (flick > 7 && cup.hardHits >= 1) {
                 final bias = cup.biasX;
                 _throw(
                   strength: (flick / 12).clamp(0.6, 1.4),
@@ -1253,13 +1293,29 @@ jobs:
 
             /* ---------------- atış ---------------- */
 
+            double get _shakeStrength => (0.7 + cup.hardHits * 0.04).clamp(0.7, 1.3);
+
+            /// Telefonun ucu masaya doğru çevrildi: zarlar fincandan döküldü.
+            /// Masaya düşüşleri, ekran tekrar sana dönünce (ya da en geç 1,2 sn sonra) başlar.
+            void _release() {
+              if (phase != Phase.holding || game.over || table == null) return;
+              _releaseStrength = _shakeStrength;
+              _releasedAt = DateTime.now();
+              ImpactFeel.I.release(_releaseStrength);
+              setState(() {
+                phase = Phase.released;
+                diceOnTable = false;
+                verdictOn = false;
+              });
+            }
+
             void _throw({required double strength, required double startX, required double dirX}) {
               final t = table;
-              if (phase != Phase.holding || game.over || t == null) return;
+              if ((phase != Phase.holding && phase != Phase.released) || game.over || t == null) return;
               final r = game.draw();
               pending = r;
               t.launch([r.d1, r.d2], strength, startX, dirX);
-              ImpactFeel.I.release(strength);
+              if (phase == Phase.holding) ImpactFeel.I.release(strength);
               setState(() {
                 phase = Phase.flying;
                 verdictOn = false;
@@ -1273,6 +1329,22 @@ jobs:
               _last = elapsed;
               if (phase == Phase.holding) {
                 cup.step(dt);
+                // dökme hareketi: telefonun üst ucu aşağı bakıyor ya da ekran yere dönük
+                final pointingDown = _gy < -3.5 || _gz < -4.0;
+                _downMs = pointingDown ? _downMs + dt * 1000 : 0;
+                if (_downMs > 60 && DateTime.now().difference(_phaseStart).inMilliseconds > 500) {
+                  _downMs = 0;
+                  _release();
+                }
+              } else if (phase == Phase.released) {
+                final lookingAgain = _gy > 1.5 && _gz > -1;
+                if (lookingAgain || DateTime.now().difference(_releasedAt).inMilliseconds > 1200) {
+                  _throw(
+                    strength: _releaseStrength,
+                    startX: 0.5 + (_gx * -0.03).clamp(-0.2, 0.2),
+                    dirX: (_gx * -0.05).clamp(-0.4, 0.4),
+                  );
+                }
               } else if (phase == Phase.flying) {
                 final t = table;
                 if (t == null) return;
@@ -1333,11 +1405,11 @@ jobs:
                   final size = Size(c.maxWidth, c.maxHeight);
                   final t = table;
                   if (t == null) {
-                    table = TableSim(size, onHit: (k, s) => ImpactFeel.I.table(k, s));
+                    table = TableSim(size, onHit: (k, s, p) => ImpactFeel.I.table(k, s, p));
                   } else if (t.size != size) {
                     t.size = size;
                   }
-                  final diceOpacity = phase == Phase.holding ? (diceOnTable ? 0.45 : 0.0) : 1.0;
+                  final diceOpacity = (phase == Phase.holding || phase == Phase.released) ? (diceOnTable ? 0.45 : 0.0) : 1.0;
                   return GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onPanStart: (d) => _panStartX = d.localPosition.dx / size.width,
@@ -1472,7 +1544,7 @@ jobs:
               } else if (!sensorsOk) {
                 text = '$turn.\nAtmak için ekranda aşağıdan yukarı kaydır.';
               } else if (throws < 2) {
-                text = '$turn, $vessel.\nTelefonu salla, sonra bileğini öne doğru silkeleyerek fırlat.\nYa da ekranda yukarı kaydır.';
+                text = '$turn, $vessel.\nTelefonu salla, sonra ucunu masaya doğru çevir: zarları döker gibi.\nYa da ekranda aşağıdan yukarı kaydır.';
               } else {
                 text = '$turn · $vessel';
               }
