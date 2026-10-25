@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 13: köşeleri yuvarlak gerçek zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 14: Barbut logosu uygulama ikonu oldu): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -2940,6 +2940,105 @@ jobs:
             });
           }
           BARBUT_EOF
+          cat > tool/make_icon.py <<'BARBUT_EOF'
+          """Barbut uygulama ikonunu üretir: iki zarın oluşturduğu sekiz köşeli yıldız.
+
+          Logo tuvalindeki amblemle aynı geometri (200 birimlik kare):
+            yıldız:  140×140'lık iki altın kare (köşe yarıçapı 10), biri 45° dönük
+            zar yüzü: ortada 88×88 kemik beyazı kare (köşe yarıçapı 14)
+            benek:   ortada, yarıçap 16, kırmızı
+
+          Çalıştırma (Flutter projesinin kökünde):  python tool/make_icon.py
+          Android: eski tip ikonlar (mipmap-*/ic_launcher.png) + uyarlanabilir ikon (Android 8+).
+          iOS: AppIcon.appiconset içindeki her PNG, kendi boyutunda yeniden çizilir.
+          """
+          import glob
+          import os
+
+          from PIL import Image, ImageDraw
+
+          WALNUT = (43, 24, 13, 255)
+          GOLD = (212, 177, 88, 255)
+          BONE = (239, 230, 210, 255)
+          PIP = (179, 25, 46, 255)
+          SS = 4  # kenar yumuşatma için büyük çizip küçült
+
+
+          def mark(px):
+              """Saydam zeminde amblem, px×px."""
+              n = px * SS
+              u = n / 200.0
+
+              def square(a, b, r, fill, rot=0):
+                  im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+                  ImageDraw.Draw(im).rounded_rectangle([a * u, a * u, b * u, b * u], radius=r * u, fill=fill)
+                  return im.rotate(rot, resample=Image.BICUBIC, center=(n / 2, n / 2)) if rot else im
+
+              img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+              img.alpha_composite(square(30, 170, 10, GOLD, 45))  # iki zar üst üste: sekiz köşeli yıldız
+              img.alpha_composite(square(30, 170, 10, GOLD))
+              img.alpha_composite(square(56, 144, 14, BONE))  # ortada zarın "1" yüzü
+              ImageDraw.Draw(img).ellipse([84 * u, 84 * u, 116 * u, 116 * u], fill=PIP)
+              return img.resize((px, px), Image.LANCZOS)
+
+
+          def tile(px, mark_ratio, radius_ratio):
+              """Zemin + ortada amblem. radius_ratio 0: tam kare (iOS kendisi maskeler)."""
+              n = px * SS
+              img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+              ImageDraw.Draw(img).rounded_rectangle([0, 0, n - 1, n - 1], radius=n * radius_ratio, fill=WALNUT)
+              img = img.resize((px, px), Image.LANCZOS)
+              m = mark(round(px * mark_ratio))
+              o = (px - m.width) // 2
+              img.alpha_composite(m, (o, o))
+              return img
+
+
+          def android():
+              res = "android/app/src/main/res"
+              sizes = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
+              for dpi, px in sizes.items():
+                  os.makedirs(f"{res}/mipmap-{dpi}", exist_ok=True)
+                  tile(px, 0.8, 0.22).save(f"{res}/mipmap-{dpi}/ic_launcher.png")
+                  # uyarlanabilir ikonun ön katmanı: 108dp, amblem güvenli 66dp alanın içinde
+                  fg = Image.new("RGBA", (round(px * 2.25),) * 2, (0, 0, 0, 0))
+                  m = mark(round(px * 2.25 * 0.62))
+                  o = (fg.width - m.width) // 2
+                  fg.alpha_composite(m, (o, o))
+                  os.makedirs(f"{res}/drawable-{dpi}", exist_ok=True)
+                  fg.save(f"{res}/drawable-{dpi}/ic_launcher_foreground.png")
+              os.makedirs(f"{res}/mipmap-anydpi-v26", exist_ok=True)
+              with open(f"{res}/mipmap-anydpi-v26/ic_launcher.xml", "w") as f:
+                  f.write(
+                      '<?xml version="1.0" encoding="utf-8"?>\n'
+                      '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                      '    <background android:drawable="@color/ic_launcher_background"/>\n'
+                      '    <foreground android:drawable="@drawable/ic_launcher_foreground"/>\n'
+                      '</adaptive-icon>\n'
+                  )
+              os.makedirs(f"{res}/values", exist_ok=True)
+              with open(f"{res}/values/ic_launcher_background.xml", "w") as f:
+                  f.write(
+                      '<?xml version="1.0" encoding="utf-8"?>\n'
+                      '<resources>\n    <color name="ic_launcher_background">#2B180D</color>\n</resources>\n'
+                  )
+              print("Android ikonları yazıldı")
+
+
+          def ios():
+              files = glob.glob("ios/Runner/Assets.xcassets/AppIcon.appiconset/*.png")
+              for p in files:
+                  with Image.open(p) as old:
+                      px = old.width
+                  # iOS saydamlık kabul etmez ve köşeleri kendisi yuvarlar: tam kare, düz zemin
+                  tile(px, 0.78, 0).convert("RGB").save(p)
+              print(f"iOS ikonları yazıldı: {len(files)}")
+
+
+          if __name__ == "__main__":
+              android()
+              ios()
+          BARBUT_EOF
           cat > tool/make_sounds.py <<'BARBUT_EOF'
           """Barbut ses dosyalarını sıfırdan üretir (dosya indirmez, kayıt kullanmaz).
 
@@ -5352,6 +5451,12 @@ jobs:
           ZAR_SESLERI
           tar xzf /tmp/zar_sesleri.tgz -C assets/sounds
           ls -la assets/sounds
+
+      - name: Uygulama ikonu
+        working-directory: barbut_app
+        run: |
+          pip install pillow
+          python tool/make_icon.py
 
       - name: Titreşim izni ve uygulama adı
         working-directory: barbut_app
