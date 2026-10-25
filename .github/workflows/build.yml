@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 10: yatayı aşağı geçince dökülen zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 11: 3B gerçek küp zarlar, yankısız fiziksel çarpma sesleri): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -263,11 +263,14 @@ jobs:
             static final SoundEngine I = SoundEngine._();
 
             static const names = [
-              'clack_1', 'clack_2', 'cup_1', 'cup_2', 'cup_hit_1', 'cup_hit_2', 'cup_hit_3', 'cup_hit_4',
-              'final', 'lose', 'palm_1', 'palm_2', 'palm_3', 'palm_4', 'pass', 'rail_1', 'rail_2',
-              'release', 'table_hit_1', 'table_hit_2', 'table_hit_3', 'table_hit_4', 'table_tick_1',
-              'table_tick_2', 'table_tick_3', 'throw_1', 'throw_2', 'throw_3', 'tick_1', 'tick_2',
-              'tick_3', 'tick_4', 'win',
+              'clack_1', 'clack_2', 'clack_3', 'clack_4', 'cup_1', 'cup_2',
+              'cup_hit_1', 'cup_hit_2', 'cup_hit_3', 'cup_hit_4', 'final', 'floor_1',
+              'floor_2', 'floor_3', 'lose', 'palm_1', 'palm_2', 'palm_3',
+              'palm_4', 'pass', 'rail_1', 'rail_2', 'rail_3', 'rail_4',
+              'release', 'table_hit_1', 'table_hit_2', 'table_hit_3', 'table_hit_4', 'table_hit_5',
+              'table_hit_6', 'table_hit_7', 'table_hit_8', 'table_tick_1', 'table_tick_2', 'table_tick_3',
+              'table_tick_4', 'table_tick_5', 'table_tick_6', 'throw_1', 'throw_2', 'throw_3',
+              'tick_1', 'tick_2', 'tick_3', 'tick_4', 'win',
             ];
 
             final Map<String, AudioSource> _sources = {};
@@ -538,7 +541,7 @@ jobs:
             /// Zarlar elde / fincanda.
             void cup(HitKind kind, double s, double pan, {required bool palm}) {
               if (kind == HitKind.dice) {
-                _sound(_pick('clack', 2), 0.2 + 0.7 * s, pan);
+                _sound(_pick('clack', 4), 0.2 + 0.7 * s, pan);
                 _haptic(s * 0.8, baseMs: 6);
                 return;
               }
@@ -555,21 +558,21 @@ jobs:
             void table(HitKind kind, double s, double pan) {
               switch (kind) {
                 case HitKind.table:
-                  _sound(_pick('table_hit', 4), 0.25 + 0.75 * s, pan);
+                  _sound(_pick('table_hit', 8), 0.25 + 0.75 * s, pan);
                   _haptic(s, baseMs: 12);
                 case HitKind.tick:
-                  _sound(_pick('table_tick', 3), 0.15 + 0.6 * s, pan);
+                  _sound(_pick('table_tick', 6), 0.15 + 0.6 * s, pan);
                   _haptic(s * 0.6, baseMs: 6);
                 case HitKind.rail:
-                  _sound(_pick('rail', 2), 0.25 + 0.75 * s, pan);
+                  _sound(_pick('rail', 4), 0.25 + 0.75 * s, pan);
                   _haptic(s, baseMs: 14);
                 case HitKind.dice:
-                  _sound(_pick('clack', 2), 0.25 + 0.75 * s, pan);
+                  _sound(_pick('clack', 4), 0.25 + 0.75 * s, pan);
                   _haptic(s * 0.8, baseMs: 6);
                 case HitKind.settle:
                   _haptic(0.15, baseMs: 6);
                 case HitKind.fall: // masanın altında, yerde: uzaktan gelen boğuk ses
-                  _sound(_pick('table_hit', 4), 0.12 + 0.2 * s, pan);
+                  _sound(_pick('floor', 3), 0.3 + 0.3 * s, pan);
                   _haptic(0.12, baseMs: 6);
                 case HitKind.wall:
                 case HitKind.floor:
@@ -749,16 +752,94 @@ jobs:
           /* =====================================================================
            *  MASADAKİ ZARLAR
            *  Ekran, yukarıdan bakılan ahşap masadır. Birimler piksel.
-           *  Zar küp gibi yuvarlanır: her kenar üstüne devrilmede üstteki yüz
-           *  değişir. Sonuç atış anında belirlenir (adil ve rastgele); fizik
-           *  zarın o yüz üstünde durmasını sağlar.
+           *  Her zar gerçek bir küptür: 3B yönelimi ([rot]) havada takla atarak,
+           *  masada kenarı üstünden devrilerek kesintisiz döner ve sonunda en yakın
+           *  yüzünün üstüne oturur. Sonuç atış anında belirlenir (adil ve rastgele):
+           *  atış önce görünmeden provadan geçirilir, hangi yüzün üste geleceği
+           *  görülür ve zarın yüz numaraları buna göre yerleştirilir. Böylece zar
+           *  hiç zıplamadan, doğal hareketle istenen yüzü gösterir.
+           *
+           *  Yönelim koordinatları: X sağ, Y ekranın yukarısı, Z masadan yukarı.
+           *  Zar yüzleri (karşılıklılar toplamı 7, gerçek zar düzeni):
+           *  1:+Z 6:-Z 2:+X 5:-X 3:+Y 4:-Y
            * ===================================================================== */
+
+          /// 3×3 döndürme matrisi, satır sıralı.
+          typedef M3 = List<double>;
+
+          M3 m3Identity() => [1, 0, 0, 0, 1, 0, 0, 0, 1];
+
+          M3 m3Mul(M3 a, M3 b) {
+            final r = List<double>.filled(9, 0);
+            for (var i = 0; i < 3; i++) {
+              for (var j = 0; j < 3; j++) {
+                r[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+              }
+            }
+            return r;
+          }
+
+          /// Birim eksen (x,y,z) etrafında [a] radyan dönüş.
+          M3 m3Rot(double x, double y, double z, double a) {
+            final c = cos(a), sn = sin(a), t = 1 - c;
+            return [
+              t * x * x + c, t * x * y - sn * z, t * x * z + sn * y,
+              t * x * y + sn * z, t * y * y + c, t * y * z - sn * x,
+              t * x * z - sn * y, t * y * z + sn * x, t * z * z + c,
+            ];
+          }
+
+          const _faceAxis = [0, 2, 0, 1, 1, 0, 2];
+          const _faceSign = [0.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0];
+
+          /// [face] yüzünün dışa bakan yönü (dünyada).
+          List<double> faceNormal(M3 r, int face) {
+            final a = _faceAxis[face], sg = _faceSign[face];
+            return [r[a] * sg, r[3 + a] * sg, r[6 + a] * sg];
+          }
+
+          /// Şu an en çok yukarı bakan yüz.
+          int faceUp(M3 r) {
+            var best = 1;
+            var bz = -2.0;
+            for (var f = 1; f <= 6; f++) {
+              final z = r[6 + _faceAxis[f]] * _faceSign[f];
+              if (z > bz) {
+                bz = z;
+                best = f;
+              }
+            }
+            return best;
+          }
+
+          /// Zarın yerel ekseninde [from] yüzünü [to] yüzünün yerine taşıyan küp dönüşü (tam sayılı).
+          M3 _relabel(int from, int to) {
+            if (from == to) return m3Identity();
+            final a = [0.0, 0.0, 0.0], b = [0.0, 0.0, 0.0];
+            a[_faceAxis[from]] = _faceSign[from];
+            b[_faceAxis[to]] = _faceSign[to];
+            M3 q;
+            if (from == 7 - to) {
+              final e = [0.0, 0.0, 0.0];
+              e[(_faceAxis[from] + 1) % 3] = 1;
+              q = m3Rot(e[0], e[1], e[2], pi);
+            } else {
+              q = m3Rot(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0], pi / 2);
+            }
+            return [for (final v in q) v.roundToDouble()];
+          }
+
           class TableDie {
             double x = 0, y = 0, z = 0, vx = 0, vy = 0, vz = 0;
-            double phi = 0; // geçerli devrilmenin açısı, 0..π/2
+            double phi = 0; // masada yuvarlanma açısı birikimi: her π/2'de bir kenar devrilmesi
             double spin = 0; // havadayken takla hızı (rad/s)
+            double ax = 1, ay = 0, az = 0; // havadaki takla ekseni
+            M3 rot = m3Identity(); // zarın 3B yönelimi
             double heading = 0, visHeading = 0;
-            int top = 1, next = 2, target = 1;
+            int target = 1;
+
+            /// Zarın gövde merkezinin masadan yüksekliği (köşesi üstündeyken yükselir).
+            double centerZ(double s) => z + s * 0.5 * (rot[6].abs() + rot[7].abs() + rot[8].abs());
             bool settled = true, entered = false;
             bool falls = false; // bu atışta masadan düşecek
             bool over = false; // kenarı aştı, yere düşüyor
@@ -798,14 +879,6 @@ jobs:
 
             bool get allSettled => active && dice.every((d) => d.settled);
 
-            List<int> _adjacent(int top) => [1, 2, 3, 4, 5, 6].where((f) => f != top && f != 7 - top).toList();
-
-            int _chooseNext(TableDie d, bool slow) {
-              final adj = _adjacent(d.top);
-              if (slow && adj.contains(d.target)) return d.target;
-              return adj[_rng.nextInt(adj.length)];
-            }
-
             /// [strength] 0.5..1.4, [startX] 0..1 ekran genişliğine göre,
             /// [dirX] -0.6..0.6 sağa/sola sapma. [falls]: hangi zar masadan düşecek.
             ///
@@ -818,6 +891,7 @@ jobs:
               final tx = 0.2 + 0.6 * _rng.nextDouble(), ty = 0.15 + 0.7 * _rng.nextDouble();
               var bestSeed = 0;
               var bestScore = double.infinity;
+              var bestFaces = [1, 1];
               for (var k = 0; k < _candidates; k++) {
                 final seed = _rng.nextInt(1 << 30);
                 final probe = TableSim(size, onHit: _silent, rng: Random(seed))
@@ -829,10 +903,21 @@ jobs:
                 if (sc < bestScore) {
                   bestScore = sc;
                   bestSeed = seed;
+                  bestFaces = [for (final d in probe.dice) faceUp(d.rot)];
                 }
               }
               _rng = Random(bestSeed);
               _start(targets, strength, startX, dirX, falls);
+              // aynı hareket, yüz numaraları yerleştirilmiş: provada üste gelen yüzün yerinde artık hedef sayı var
+              for (var i = 0; i < dice.length; i++) {
+                dice[i].rot = m3Mul(dice[i].rot, _relabel(targets[i], bestFaces[i]));
+              }
+            }
+
+            List<double> _randomAxis() {
+              final z = 2 * _rng.nextDouble() - 1, th = 2 * pi * _rng.nextDouble();
+              final r = sqrt(max(0.0, 1 - z * z));
+              return [r * cos(th), r * sin(th), z];
             }
 
             static void _silent(HitKind kind, double strength, double pan) {}
@@ -848,9 +933,10 @@ jobs:
               for (var i = 0; i < dice.length; i++) {
                 final d = dice[i];
                 d.target = targets[i];
-                d.top = 1 + _rng.nextInt(6);
-                d.next = _chooseNext(d, false);
-                d.phi = _rng.nextDouble() * 0.6;
+                final a1 = _randomAxis(), a2 = _randomAxis();
+                d.rot = m3Mul(m3Rot(a1[0], a1[1], a1[2], _rng.nextDouble() * 2 * pi),
+                    m3Rot(a2[0], a2[1], a2[2], _rng.nextDouble() * 2 * pi));
+                d.phi = 0;
                 d.settled = false;
                 d.entered = false;
                 d.falls = falls[i];
@@ -869,6 +955,7 @@ jobs:
                 d.z = s * 0.9;
                 d.vz = s * (7 + 4 * st) * (0.85 + 0.3 * _rng.nextDouble());
                 d.spin = 14 + 12 * _rng.nextDouble();
+                _airAxis(d, 0.6);
                 d.heading = atan2(d.vy, d.vx);
                 d.visHeading = d.heading;
               }
@@ -923,9 +1010,8 @@ jobs:
                       ..settled = true;
                     continue;
                   }
+                  _tipFlat(d, 10);
                   d
-                    ..top = d.target
-                    ..phi = 0
                     ..z = 0
                     ..vx = 0
                     ..vy = 0
@@ -933,6 +1019,52 @@ jobs:
                     ..settled = true;
                 }
               }
+            }
+
+            /// Havadaki takla ekseni: hareket yönüne dik yatay eksen + biraz rastgelelik.
+            void _airAxis(TableDie d, double jitter) {
+              final sp = sqrt(d.vx * d.vx + d.vy * d.vy);
+              var kx = 0.0, ky = 1.0;
+              if (sp > 1) {
+                // dünya: Y yukarı → hız (vx, -vy); eksen = Z × h
+                kx = d.vy / sp;
+                ky = d.vx / sp;
+              }
+              final r = _randomAxis();
+              final x = kx + r[0] * jitter, y = ky + r[1] * jitter, z = r[2] * jitter;
+              final n = sqrt(x * x + y * y + z * z);
+              d.ax = x / n;
+              d.ay = y / n;
+              d.az = z / n;
+            }
+
+            void _rotate(TableDie d, double x, double y, double z, double a) {
+              if (a == 0) return;
+              d.rot = m3Mul(m3Rot(x, y, z, a), d.rot);
+            }
+
+            /// En çok yukarı bakan yüzü düzleştirmeye doğru [maxStep] kadar devirir.
+            /// Düz oturduysa true döner.
+            bool _tipFlat(TableDie d, double maxStep) {
+              final n = faceNormal(d.rot, faceUp(d.rot));
+              final ang = acos(n[2].clamp(-1.0, 1.0));
+              final len = sqrt(n[0] * n[0] + n[1] * n[1]);
+              if (ang < 0.004 || len < 1e-9) return true;
+              final step = min(ang, maxStep);
+              _rotate(d, n[1] / len, -n[0] / len, 0, step);
+              return step >= ang;
+            }
+
+            /// Masada kayarken zar, yuvarlandığı yöne bir yüzünü çevirir (gerçek küp kenarı üstünden devrilir).
+            void _alignYaw(TableDie d, double hx, double hy, double rate) {
+              var bi = 0;
+              for (var i = 1; i < 3; i++) {
+                if (d.rot[6 + i].abs() < d.rot[6 + bi].abs()) bi = i;
+              }
+              final ang = atan2(d.rot[3 + bi], d.rot[bi]);
+              final diff = atan2(hy, hx) - ang;
+              final e = ((diff + pi / 4) % (pi / 2)) - pi / 4;
+              _rotate(d, 0, 0, 1, e * rate);
             }
 
             void _turn(TableDie d, double a) {
@@ -957,12 +1089,7 @@ jobs:
                   d.z += d.vz * dt;
                   d.x += d.vx * dt;
                   d.y += d.vy * dt;
-                  d.phi += d.spin * dt;
-                  while (d.phi >= pi / 2) {
-                    d.phi -= pi / 2;
-                    d.top = d.next;
-                    d.next = _chooseNext(d, false);
-                  }
+                  _rotate(d, d.ax, d.ay, d.az, d.spin * dt);
                   if (d.z < -s * 3) {
                     d.fallen = true;
                     d.settled = true;
@@ -979,7 +1106,7 @@ jobs:
                   d.z += d.vz * dt;
                   d.x += d.vx * dt;
                   d.y += d.vy * dt;
-                  d.phi += d.spin * dt;
+                  _rotate(d, d.ax, d.ay, d.az, d.spin * dt); // havada takla
                   if (d.z <= 0) {
                     d.z = 0;
                     final impact = -d.vz;
@@ -991,6 +1118,7 @@ jobs:
                     sp *= keep;
                     _turn(d, (_rng.nextDouble() - 0.5) * 0.5); // köşesine düşen zar yön değiştirir
                     d.spin = sp / s * (pi / 2) + 6;
+                    _airAxis(d, 0.35);
                     onHit(HitKind.table, (impact / (s * 13)).clamp(0.0, 1.0), _pan(d.x));
                   }
                 } else if (sp > 0) {
@@ -999,17 +1127,21 @@ jobs:
                   d.vy *= ns / sp;
                   d.x += d.vx * dt;
                   d.y += d.vy * dt;
-                  d.phi += ns * dt / s * (pi / 2);
+                  final roll = ns * dt / s * (pi / 2);
+                  d.phi += roll;
                   sp = ns;
+                  if (sp > 1) {
+                    // kenarı üstünden yuvarlanma: eksen = Z × hareket yönü (dünya Y yukarı)
+                    final hx = d.vx / sp, hy = -d.vy / sp;
+                    _alignYaw(d, hx, hy, min(1.0, 8 * dt));
+                    _rotate(d, -hy, hx, 0, roll);
+                  }
                 }
                 if (sp > 4) d.heading = atan2(d.vy, d.vx);
 
-                // kenar üstüne devrilme → yeni yüz
+                // kenar üstüne devrilme: tık sesi, hızlıyken küçük sıçrama
                 while (d.phi >= pi / 2) {
                   d.phi -= pi / 2;
-                  d.top = d.next;
-                  final slow = sp < s * 3.5;
-                  d.next = _chooseNext(d, slow);
                   if (!airborne && d.z == 0) {
                     onHit(HitKind.tick, (sp / (s * 22)).clamp(0.06, 0.6), _pan(d.x));
                     if (sp > s * 5) d.vz = sp * 0.05; // hızlı yuvarlanırken küçük sıçrama
@@ -1060,7 +1192,7 @@ jobs:
                   }
                 }
 
-                // yavaşladı: hedef yüz üstünde dur
+                // yavaşladı: en yakın yüzünün üstüne devrilip oturur (ağırlığıyla, hızlanarak)
                 final grounded = d.z == 0 && d.vz == 0;
                 if (d.falls) {
                   // düşecek zar durmasın: kenara doğru yuvarlanmaya devam eder
@@ -1068,16 +1200,12 @@ jobs:
                 } else if (grounded && sqrt(d.vx * d.vx + d.vy * d.vy) < s * 0.5) {
                   d.vx = 0;
                   d.vy = 0;
-                  if (d.phi > pi / 4 || d.top != d.target) {
-                    if (d.phi < 0.03 && d.top != d.target) d.next = _chooseNext(d, true);
-                    d.phi += 7 * dt; // son devrilme
-                  } else {
-                    d.phi -= d.phi * min(1.0, 14 * dt);
-                    if (d.phi < 0.004) {
-                      d.phi = 0;
-                      d.settled = true;
-                      onHit(HitKind.settle, 0.15, _pan(d.x));
-                    }
+                  final n = faceNormal(d.rot, faceUp(d.rot));
+                  final ang = acos(n[2].clamp(-1.0, 1.0));
+                  if (_tipFlat(d, (2.5 + 14 * ang) * dt)) {
+                    d.settled = true;
+                    onHit(HitKind.tick, 0.1, _pan(d.x)); // son "tak"
+                    onHit(HitKind.settle, 0.15, _pan(d.x));
                   }
                 }
 
@@ -1118,6 +1246,7 @@ jobs:
           BARBUT_EOF
           cat > lib/table_view.dart <<'BARBUT_EOF'
           import 'dart:math';
+          import 'dart:typed_data';
 
           import 'package:flutter/material.dart';
 
@@ -1163,81 +1292,195 @@ jobs:
             }
           }
 
-          /// Masadaki zarlar: yukarıdan bakış, yuvarlanırken iki yüz görünür.
+          /// Masadaki zarlar: gerçek 3B küp, yukarıdan hafif perspektifle bakılır.
+          /// Görünen yüzler ışığa göre gölgelenir, kenarlar yuvarlatılmıştır, benekler
+          /// yüzle birlikte eğilir; masaya düşen gölge zarın şeklini ve yüksekliğini izler.
           class DicePainter extends CustomPainter {
             DicePainter(this.sim, Listenable repaint, {required this.opacity}) : super(repaint: repaint);
 
             final TableSim sim;
             final double opacity;
 
+            // ışık: sol üstten, yukarıdan (dünya: X sağ, Y ekranın yukarısı, Z yukarı)
+            static const _lx = -0.38, _ly = 0.46, _lz = 0.80;
+
+            // yüz düzlemindeki iki kenar ekseni (zarın yerel ekseni olarak)
+            static const _uAxis = [0, 1, 1, 2, 2, 1, 1];
+            static const _vAxis = [0, 0, 2, 0, 0, 2, 0];
+
             @override
             void paint(Canvas canvas, Size size) {
               if (opacity <= 0) return;
-              final list = [...sim.dice]..sort((a, b) => a.z.compareTo(b.z));
+              final s = sim.s;
+              final list = sim.dice.where((d) => !d.fallen).toList()..sort((a, b) => a.z.compareTo(b.z));
               if (opacity < 1) {
                 canvas.saveLayer(Offset.zero & size, Paint()..color = Color.fromRGBO(0, 0, 0, opacity));
               }
               for (final d in list) {
-                if (d.fallen) continue;
-                _drawDie(canvas, d, sim.s);
+                if (d.z >= 0) _shadow(canvas, d, s);
+              }
+              for (final d in list) {
+                _die(canvas, d, s, size);
               }
               if (opacity < 1) canvas.restore();
             }
 
-            void _drawDie(Canvas canvas, TableDie d, double s) {
-              final lift = d.z;
-              final scale = max(0.3, 1 + lift / (s * 5));
-              final dropping = lift < 0; // masanın kenarından aşağı düşüyor
-              if (dropping) {
-                final a = (1 + lift / (s * 3)).clamp(0.0, 1.0);
-                canvas.saveLayer(null, Paint()..color = Color.fromRGBO(0, 0, 0, a));
-              }
+            /// Zarın yerel noktası (−0,5..0,5) → ekran (x, y) ve yükseklik.
+            List<double> _world(TableDie d, double s, double hz, double lx, double ly, double lz) {
+              final r = d.rot;
+              final wx = r[0] * lx + r[1] * ly + r[2] * lz;
+              final wy = r[3] * lx + r[4] * ly + r[5] * lz;
+              final wz = r[6] * lx + r[7] * ly + r[8] * lz;
+              return [d.x + wx * s, d.y - wy * s, hz + wz * s];
+            }
 
-              // gölge: zar yükseldikçe uzaklaşır ve yumuşar (düşerken altında masa yok)
-              if (!dropping) {
-                final shadowCenter = Offset(d.x + lift * 0.35 + s * 0.06, d.y + lift * 0.5 + s * 0.08);
-                canvas.drawRRect(
-                  RRect.fromRectAndRadius(
-                    Rect.fromCenter(center: shadowCenter, width: s * (1 + lift / (s * 8)), height: s * (1 + lift / (s * 8))),
-                    Radius.circular(s * 0.2),
-                  ),
+            Offset _proj(List<double> p, Size size) {
+              final cx = size.width / 2, cy = size.height / 2;
+              final hc = max(size.width, size.height) * 1.1; // göz yüksekliği
+              final f = hc / max(hc - p[2], 1.0);
+              return Offset(cx + (p[0] - cx) * f, cy + (p[1] - cy) * f);
+            }
+
+            void _shadow(Canvas canvas, TableDie d, double s) {
+              final hz = d.centerZ(s);
+              final pts = <Offset>[];
+              for (final lx in const [-0.5, 0.5]) {
+                for (final ly in const [-0.5, 0.5]) {
+                  for (final lz in const [-0.5, 0.5]) {
+                    final p = _world(d, s, hz, lx, ly, lz);
+                    // ışığın tersine, yüksekliği kadar kayar
+                    pts.add(Offset(p[0] + p[2] * 0.42, p[1] + p[2] * 0.5));
+                  }
+                }
+              }
+              final hull = _hull(pts);
+              final path = Path()..addPolygon(hull, true);
+              final lift = d.z;
+              canvas.drawPath(
+                path,
+                Paint()
+                  ..color = Color.fromRGBO(0, 0, 0, (0.5 - lift / (s * 10)).clamp(0.12, 0.5))
+                  ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.05 + lift * 0.08),
+              );
+              if (lift < s * 0.05) {
+                // değme gölgesi: zar masaya oturunca tabanında koyu, keskin bir çizgi
+                canvas.drawPath(
+                  path,
                   Paint()
-                    ..color = Color.fromRGBO(0, 0, 0, (0.55 - lift / (s * 12)).clamp(0.15, 0.55))
-                    ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.06 + lift * 0.06),
+                    ..color = const Color(0x55000000)
+                    ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.015),
                 );
               }
+            }
 
-              canvas.save();
-              canvas.translate(d.x, d.y - lift * 0.15);
-              canvas.rotate(d.visHeading);
-              canvas.scale(scale);
+            List<Offset> _hull(List<Offset> p) {
+              final pts = [...p]..sort((a, b) => a.dx != b.dx ? a.dx.compareTo(b.dx) : a.dy.compareTo(b.dy));
+              double cross(Offset o, Offset a, Offset b) => (a.dx - o.dx) * (b.dy - o.dy) - (a.dy - o.dy) * (b.dx - o.dx);
+              final lower = <Offset>[], upper = <Offset>[];
+              for (final q in pts) {
+                while (lower.length >= 2 && cross(lower[lower.length - 2], lower.last, q) <= 0) {
+                  lower.removeLast();
+                }
+                lower.add(q);
+              }
+              for (final q in pts.reversed) {
+                while (upper.length >= 2 && cross(upper[upper.length - 2], upper.last, q) <= 0) {
+                  upper.removeLast();
+                }
+                upper.add(q);
+              }
+              lower.removeLast();
+              upper.removeLast();
+              return [...lower, ...upper];
+            }
 
-              final phi = d.phi.clamp(0.0, pi / 2);
-              final c = cos(phi), sn = sin(phi);
-              final wTop = s * c, wBack = s * sn;
-              final left = -(wTop + wBack) / 2;
-              if (wBack > 0.5) _face(canvas, d.next, left, wBack, s, 0.62 + 0.33 * sn);
-              if (wTop > 0.5) _face(canvas, d.top, left + wBack, wTop, s, 1 - 0.25 * sn);
-              canvas.restore();
+            void _die(Canvas canvas, TableDie d, double s, Size size) {
+              final hz = d.centerZ(s);
+              final dropping = d.z < 0; // masanın kenarından aşağı düşüyor
+              if (dropping) {
+                final a = (1 + d.z / (s * 3)).clamp(0.0, 1.0);
+                canvas.saveLayer(null, Paint()..color = Color.fromRGBO(0, 0, 0, a));
+              }
+              final cam = [size.width / 2, size.height / 2, max(size.width, size.height) * 1.1];
+
+              final faces = <_Face>[];
+              for (var f = 1; f <= 6; f++) {
+                final n = faceNormal(d.rot, f);
+                // yüz merkezi ekranda; normal ekran koordinatında (y aşağı)
+                final c = [d.x + n[0] * s / 2, d.y - n[1] * s / 2, hz + n[2] * s / 2];
+                final view = n[0] * (cam[0] - c[0]) - n[1] * (cam[1] - c[1]) + n[2] * (cam[2] - c[2]);
+                if (view <= 0) continue;
+                final loc = [0.0, 0.0, 0.0], u = [0.0, 0.0, 0.0], v = [0.0, 0.0, 0.0];
+                loc[_faceAxisOf(f)] = _faceSignOf(f) * 0.5;
+                u[_uAxis[f]] = 1;
+                v[_vAxis[f]] = 1;
+                Offset at(double a, double b) => _proj(
+                    _world(d, s, hz, loc[0] + (a - 0.5) * u[0] + (b - 0.5) * v[0], loc[1] + (a - 0.5) * u[1] + (b - 0.5) * v[1],
+                        loc[2] + (a - 0.5) * u[2] + (b - 0.5) * v[2]),
+                    size);
+                final lit = (n[0] * _lx + n[1] * _ly + n[2] * _lz).clamp(0.0, 1.0);
+                faces.add(_Face(f, at(0, 0), at(1, 0), at(0, 1), at(1, 1), 0.42 + 0.58 * lit, view));
+              }
+              faces.sort((a, b) => a.view.compareTo(b.view));
+
+              // 1) gövde: yüzlerin tam dörtgenleri, biraz koyu (yuvarlak kenarların pahı)
+              for (final fc in faces) {
+                final path = Path()..addPolygon([fc.p00, fc.p10, fc.p11, fc.p01], true);
+                canvas.drawPath(path, Paint()..color = Color.lerp(const Color(0xFF3A2E1F), Palette.boneShade, fc.light * 0.85)!);
+              }
+              // 2) yüzler: yuvarlatılmış, ışığa göre aydınlık, üstünde benekler
+              for (final fc in faces) {
+                canvas.save();
+                final a = fc.p10 - fc.p00, b = fc.p01 - fc.p00;
+                canvas.transform(Float64List.fromList([a.dx, a.dy, 0, 0, b.dx, b.dy, 0, 0, 0, 0, 1, 0, fc.p00.dx, fc.p00.dy, 0, 1]));
+                _paintFace(canvas, fc.face, fc.light);
+                canvas.restore();
+              }
               if (dropping) canvas.restore();
             }
 
-            void _face(Canvas canvas, int value, double left, double width, double s, double shade) {
-              canvas.save();
-              canvas.translate(left, -s / 2);
-              canvas.scale(width / s, 1);
-              paintDieFace(canvas, s, value);
-              if (shade < 1) {
-                canvas.drawRRect(
-                  RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, s, s), Radius.circular(s * 0.16)),
-                  Paint()..color = Color.fromRGBO(20, 12, 4, (1 - shade).clamp(0.0, 0.6)),
-                );
+            static int _faceAxisOf(int f) => const [0, 2, 0, 1, 1, 0, 2][f];
+            static double _faceSignOf(int f) => const [0.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0][f];
+
+            /// Birim karede (0..1) bir yüz.
+            void _paintFace(Canvas canvas, int value, double light) {
+              const inset = 0.035;
+              final rect = const Rect.fromLTWH(inset, inset, 1 - 2 * inset, 1 - 2 * inset);
+              final rr = RRect.fromRectAndRadius(rect, const Radius.circular(0.17));
+              final base = Color.lerp(const Color(0xFF4A3B28), Palette.bone, light)!;
+              final hi = Color.lerp(const Color(0xFF5A4A34), Palette.boneLight, light)!;
+              canvas.drawRRect(
+                rr,
+                Paint()
+                  ..shader = LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [hi, base],
+                  ).createShader(rect),
+              );
+              final red = value == 1 || value == 4;
+              final r = value == 1 ? 0.115 : 0.085;
+              const f = [0.26, 0.5, 0.74];
+              final pipColor = Color.lerp(Colors.black, red ? Palette.pipRed : Palette.pip, 0.55 + 0.45 * light)!;
+              final rim = Paint()..color = Color.fromRGBO(255, 255, 255, 0.18 * light);
+              final pip = Paint()..color = pipColor;
+              for (final i in _pips[value] ?? const <int>[]) {
+                final c = Offset(f[i % 3], f[i ~/ 3]);
+                // oyuk benek: alt-sağ kenarında ince ışık, içi koyu
+                canvas.drawCircle(c + const Offset(0.008, 0.01), r, rim);
+                canvas.drawCircle(c, r, pip);
               }
-              canvas.restore();
             }
 
             @override
             bool shouldRepaint(covariant DicePainter old) => true;
+          }
+
+          class _Face {
+            _Face(this.face, this.p00, this.p10, this.p01, this.p11, this.light, this.view);
+            final int face;
+            final Offset p00, p10, p01, p11;
+            final double light, view;
           }
 
           /// Kahvehane masası: koyu ceviz, damarlar, kenar pervazı.
@@ -2796,52 +3039,6 @@ jobs:
               print(name, f"{len(x) / SR:.2f}s")
 
 
-          # --- kupada tek tıkırtı (sallarken) ---
-          for i in range(1, 5):
-              x = buf(0.35)
-              for k in range(rng.integers(1, 3)):
-                  at = k * 0.022 + rng.uniform(0, 0.01)
-                  add(x, noise_burst(0.03, rng.uniform(2400, 4200), q=5, curve=10), at, 0.22)
-                  add(x, sine(0.04, rng.uniform(1000, 1600), curve=9), at, 0.06)
-              add(x, band(rng.uniform(-1, 1, len(x)), 900, 1700) * env(len(x), 0.01, 12), 0, 0.05)
-              save(f"tick_{i}.wav", verb(x, 0.25), peak=0.7)
-
-          # --- düğmeyle atış: def vuruşu + uğultu + kupada çalkalama (0.64 sn) ---
-          for i in range(1, 3):
-              x = buf(1.6)
-              for f, g, typ in [(55, 0.07, 0), (82.41, 0.07, 0), (110, 0.03, 1)]:
-                  s = sine(1.6, f, att=0.6, curve=2.5)
-                  add(x, lowpass(s, 400), 0, g)
-              add(x, sine(0.55, 150, 46, curve=5), 0, 0.75)
-              add(x, lowpass(rng.uniform(-1, 1, int(SR * 0.07)), 900) * env(int(SR * 0.07), 0.002, 8), 0, 0.35)
-              bed = band(rng.uniform(-1, 1, int(SR * 0.65)), 900, 1800) * env(int(SR * 0.65), 0.2, 3) * 2
-              add(x, bed, 0.05, 0.05)
-              for _ in range(16):
-                  at = 0.06 + rng.uniform(0, 0.58)
-                  add(x, noise_burst(0.03, rng.uniform(2400, 4200), q=5, curve=10), at, rng.uniform(0.18, 0.28))
-                  add(x, sine(0.04, rng.uniform(1000, 1600), curve=9), at, 0.05)
-              save(f"cup_{i}.wav", verb(x, 0.5))
-
-          # --- savruluş + tepside sekmeler (t=0 savruluş, ilk çarpma 0.22 sn) ---
-          HITS = [0.22, 0.46, 0.66, 0.80, 0.90, 0.96]
-          AMPS = [1, 0.7, 0.5, 0.34, 0.22, 0.12]
-          for i in range(1, 4):
-              x = buf(2.0)
-              n = int(SR * 0.3)
-              wh = rng.uniform(-1, 1, n)
-              sweep = np.zeros(n)
-              # basit süpürülen bant: parçalı filtre
-              seg = n // 8
-              for s in range(8):
-                  f = 400 * (3200 / 400) ** (s / 7)
-                  sweep[s * seg:(s + 1) * seg] = band(wh, f * 0.7, f * 1.3)[s * seg:(s + 1) * seg]
-              add(x, sweep * env(n, 0.12, 4) * 2, 0, 0.18)
-              for die, off in [(0, 0.0), (1, 0.035)]:
-                  for h, a in zip(HITS, AMPS):
-                      at = h + off + (rng.uniform(0, 0.02) if die else 0)
-                      add(x, bone_click(a, pitch=1.0 + die * 0.07 + rng.uniform(-0.05, 0.05)), at)
-              save(f"throw_{i}.wav", verb(x, 0.55))
-
           # --- sonuç sesleri ---
           x = buf(4.2)
           for k, n in enumerate([0, 2, 3, 4, 7]):
@@ -2872,79 +3069,174 @@ jobs:
 
 
           # =====================================================================
-          #  "Avuç / fincan" modu için kısa çarpma sesleri (hızına göre çalınır)
+          #  ZAR ÇARPMA SESLERİ — fiziksel (modal) sentez, YANKISIZ
+          #  Gerçek bir çarpma: çok kısa bir temas darbesi, çarpışan iki cismin
+          #  kendi titreşim kipleri (rezonansları) ve hızla sönme. Kemik zar küçük
+          #  ve serttir: yüksek frekanslarda (4–14 kHz) birkaç milisaniye çınlar.
+          #  Ahşap masa kalın ve sönümlüdür: 150–2500 Hz arası, onlarca ms içinde
+          #  susar. Oda yankısı EKLENMEZ: sesler kuru ve yakın duyulur.
           # =====================================================================
-          IR_ROOM = impulse_response(0.7, 3.8)
 
 
-          def room(dry, wet=0.18):
-              w = fftconvolve(dry, IR_ROOM)[: len(dry)]
-              return dry + w * wet
+          def pulse(ms):
+              """Temas darbesi: sert çarpma kısa (parlak), yumuşak çarpma uzun (boğuk)."""
+              n = max(2, int(SR * ms / 1000))
+              return np.sin(np.linspace(0, np.pi, n)) ** 2
 
 
-          # porselen fincana çarpan kemik zar: tık + kısa porselen çınlaması
+          def modes(dur, spec):
+              """spec: (frekans, genlik, sönme süresi sn) listesi → sönümlü sinüsler toplamı."""
+              n = int(SR * dur)
+              t = np.arange(n) / SR
+              x = np.zeros(n)
+              for f, a, tau in spec:
+                  if f >= SR / 2 - 500:
+                      continue
+                  x += a * np.sin(2 * np.pi * f * t + rng.uniform(0, 2 * np.pi)) * np.exp(-t / tau)
+              return x
+
+
+          def die_spec(bright=1.0):
+              """Kemik/reçine zar: birkaç tiz, çok kısa kip."""
+              base = rng.uniform(4300, 5600)
+              out = []
+              for m, a, tau in [(1, 1.0, 0.016), (1.53, 0.7, 0.012), (1.98, 0.55, 0.010),
+                                (2.44, 0.35, 0.008), (2.91, 0.25, 0.006)]:
+                  out.append((base * m * rng.uniform(0.97, 1.03), a * bright * rng.uniform(0.7, 1.2),
+                              tau * rng.uniform(0.8, 1.25)))
+              return out
+
+
+          def wood_spec(body=1.0, damp=1.0):
+              """Kalın ahşap masa: düşük-orta kipler, hızlı sönme (ceviz, cilalı)."""
+              out = []
+              for f, a, tau in [(rng.uniform(150, 210), 0.55, 0.045), (rng.uniform(320, 420), 0.7, 0.035),
+                                (rng.uniform(560, 700), 0.6, 0.026), (rng.uniform(850, 1050), 0.45, 0.018),
+                                (rng.uniform(1300, 1600), 0.3, 0.012), (rng.uniform(1900, 2400), 0.22, 0.008)]:
+                  out.append((f, a * body * rng.uniform(0.75, 1.25), tau * damp * rng.uniform(0.8, 1.2)))
+              return out
+
+
+          def strike(contact_ms, die_amt, wood_amt, wood_damp=1.0, dur=0.12, die_bright=1.0):
+              """Tek temas: darbe × (zar kipleri + masa kipleri) + temasın kısa 'tık' gürültüsü."""
+              ir = die_amt * modes(dur, die_spec(die_bright)) + wood_amt * modes(dur, wood_spec(1.0, wood_damp))
+              x = np.convolve(ir, pulse(contact_ms))[: int(SR * dur)]
+              n = int(SR * 0.0025)
+              click = highpass(rng.uniform(-1, 1, n), 2500) * np.exp(-np.arange(n) / (SR * 0.0005))
+              x[:n] += click * die_amt * 0.25 * (0.25 / max(contact_ms, 0.05))
+              return x
+
+
+          def norm(x):
+              return x / (np.max(np.abs(x)) + 1e-9)
+
+
+          def dry_save(name, x, peak):
+              """Kuru kayıt: yalnızca baştaki tıkı ezmeyen hafif yumuşatma, kuyruk 5 ms'de kapanır."""
+              x = norm(x)
+              fade = int(SR * 0.005)
+              x[-fade:] *= np.linspace(1, 0, fade)
+              with wave.open(os.path.join(OUT, name), "wb") as w:
+                  w.setnchannels(1)
+                  w.setsampwidth(2)
+                  w.setframerate(SR)
+                  w.writeframes((x * peak * 32767).astype(np.int16).tobytes())
+              print(name, f"{len(x) / SR:.3f}s")
+
+
+          def landing(contact):
+              """Zarın masaya düşüşü: önce bir köşe/kenar, hemen ardından yüzü oturur (tı-tak)."""
+              x = buf(0.16)
+              add(x, strike(contact, 0.55, 1.0), 0)
+              gap = rng.uniform(0.003, 0.012)
+              add(x, strike(contact * 1.3, 0.35, 0.6), gap, rng.uniform(0.35, 0.6))
+              if rng.random() < 0.5:
+                  add(x, strike(contact * 1.6, 0.25, 0.3), gap + rng.uniform(0.004, 0.01), rng.uniform(0.15, 0.3))
+              return x
+
+
+          # masaya düşüş (sert)
+          for i in range(1, 9):
+              save_x = landing(rng.uniform(0.12, 0.22))
+              dry_save(f"table_hit_{i}.wav", save_x, 0.92)
+
+          # yuvarlanırken kenar üstüne devrilme: yumuşak, kısa "tık"
+          for i in range(1, 7):
+              x = buf(0.08)
+              add(x, strike(rng.uniform(0.16, 0.28), 0.7, 0.5, wood_damp=0.6, dur=0.08), 0)
+              dry_save(f"table_tick_{i}.wav", x, 0.75)
+
+          # masanın pervazına çarpma: dikey tahta, daha tok ve boğuk
           for i in range(1, 5):
-              x = buf(0.4)
-              add(x, bone_click(0.9, pitch=1.0 + rng.uniform(-0.08, 0.08)), 0)
-              f0 = rng.uniform(2100, 2700)
-              for m, a, c in [(1, 0.10, 14), (1.58, 0.07, 18), (2.31, 0.05, 22)]:
-                  add(x, sine(0.35, f0 * m, att=0.001, curve=c), 0, a)
-              add(x, sine(0.08, rng.uniform(380, 460), curve=12), 0, 0.12)
-              save(f"cup_hit_{i}.wav", room(x, 0.25), peak=0.85)
+              x = buf(0.14)
+              ir = 0.35 * modes(0.14, die_spec(0.8)) + 1.0 * modes(0.14, [
+                  (rng.uniform(240, 300), 0.8, 0.03), (rng.uniform(480, 600), 0.9, 0.022),
+                  (rng.uniform(900, 1100), 0.6, 0.014), (rng.uniform(1500, 1800), 0.35, 0.009)])
+              add(x, np.convolve(ir, pulse(rng.uniform(0.25, 0.4)))[: len(x)], 0)
+              dry_save(f"rail_{i}.wav", x, 0.9)
 
-          # avuç içi: boğuk, yumuşak
+          # iki zarın birbirine çarpması: kemik-kemik, çok parlak ve kısa
           for i in range(1, 5):
-              x = buf(0.25)
-              n = int(SR * 0.06)
-              add(x, lowpass(rng.uniform(-1, 1, n), rng.uniform(700, 1100)) * env(n, 0.002, 9) * 2.5, 0, 0.5)
-              add(x, sine(0.1, rng.uniform(100, 130), 75, curve=9), 0, 0.5)
-              add(x, lowpass(bone_click(0.6), 1600), 0.004)
-              save(f"palm_{i}.wav", x, peak=0.8)
+              x = buf(0.06)
+              ir = modes(0.06, die_spec(1.0)) + modes(0.06, die_spec(1.0))
+              add(x, np.convolve(ir, pulse(rng.uniform(0.06, 0.1)))[: len(x)], 0)
+              dry_save(f"clack_{i}.wav", x, 0.8)
 
-          # ahşap masaya düşüş: gövde "tok" + ahşap rezonansı + tık
-          for i in range(1, 5):
-              x = buf(0.45)
-              add(x, sine(0.18, rng.uniform(170, 230), 120, curve=8), 0, 0.55)
-              n = int(SR * 0.12)
-              add(x, band(rng.uniform(-1, 1, n), 480, 1150) * env(n, 0.001, 10) * 3, 0, 0.35)
-              add(x, bone_click(0.8, pitch=0.9 + rng.uniform(-0.05, 0.05)), 0.002)
-              save(f"table_hit_{i}.wav", room(x, 0.22), peak=0.9)
-
-          # yuvarlanırken kenar üstüne her devrilme: hafif tık-tok
+          # masadan yere düşen zar: alçakta, uzakta, boğuk (yankı yok, sadece tiz kısılmış)
           for i in range(1, 4):
-              x = buf(0.2)
-              add(x, sine(0.08, rng.uniform(230, 300), curve=10), 0, 0.35)
-              add(x, bone_click(0.55, pitch=1.05 + rng.uniform(-0.05, 0.05)), 0)
-              save(f"table_tick_{i}.wav", room(x, 0.15), peak=0.7)
+              x = lowpass(landing(rng.uniform(0.3, 0.45)), 1800)
+              dry_save(f"floor_{i}.wav", x, 0.7)
 
-          # masa kenarına (pervaz) çarpma: daha kalın, tahta tokmak
+          # porselen fincana çarpan zar: zar tıkı + porselenin kısa, gerçek çınlaması
+          for i in range(1, 5):
+              x = buf(0.22)
+              f0 = rng.uniform(2300, 2900)
+              ir = 0.6 * modes(0.22, die_spec(1.0)) + modes(0.22, [
+                  (f0, 0.5, 0.06), (f0 * rng.uniform(1.5, 1.6), 0.35, 0.045),
+                  (f0 * rng.uniform(2.25, 2.4), 0.25, 0.03), (rng.uniform(900, 1100), 0.3, 0.02)])
+              add(x, np.convolve(ir, pulse(rng.uniform(0.1, 0.18)))[: len(x)], 0)
+              dry_save(f"cup_hit_{i}.wav", x, 0.85)
+
+          # avuç içi: deri ve et, neredeyse hiç çınlamaz
+          for i in range(1, 5):
+              x = buf(0.07)
+              ir = 0.25 * modes(0.07, die_spec(0.6)) + modes(0.07, [
+                  (rng.uniform(140, 200), 1.0, 0.012), (rng.uniform(380, 520), 0.5, 0.007)])
+              add(x, np.convolve(ir, pulse(rng.uniform(0.8, 1.4)))[: len(x)], 0)
+              dry_save(f"palm_{i}.wav", x, 0.8)
+
+          # kupada sallarken tıkırtı (klasik masa)
+          for i in range(1, 5):
+              x = buf(0.08)
+              for k in range(rng.integers(1, 3)):
+                  add(x, strike(rng.uniform(0.12, 0.2), 1.0, 0.15, dur=0.05), k * rng.uniform(0.006, 0.02), 0.8 ** k)
+              dry_save(f"tick_{i}.wav", x, 0.7)
+
+          # klasik masada düğmeyle atış: kupada çalkalanma (yankısız)
           for i in range(1, 3):
-              x = buf(0.5)
-              add(x, sine(0.25, rng.uniform(105, 125), 85, curve=7), 0, 0.6)
-              n = int(SR * 0.15)
-              add(x, band(rng.uniform(-1, 1, n), 260, 720) * env(n, 0.001, 8) * 3, 0, 0.4)
-              add(x, lowpass(bone_click(0.8), 2600), 0)
-              save(f"rail_{i}.wav", room(x, 0.25), peak=0.9)
+              x = buf(0.75)
+              for _ in range(18):
+                  add(x, strike(rng.uniform(0.12, 0.22), 1.0, 0.15, dur=0.05), 0.02 + rng.uniform(0, 0.65),
+                      rng.uniform(0.3, 0.8))
+              dry_save(f"cup_{i}.wav", x, 0.85)
 
-          # iki zarın birbirine çarpması: keskin kemik "çat"
-          for i in range(1, 3):
-              x = buf(0.25)
-              for k in range(2):
-                  add(x, noise_burst(0.025, rng.uniform(3400, 4600), q=4, curve=12), k * 0.004, 0.4)
-              add(x, sine(0.05, rng.uniform(1800, 2200), curve=10), 0, 0.15)
-              save(f"clack_{i}.wav", room(x, 0.15), peak=0.85)
+          # klasik masada zarların tepsiye dökülüşü (yankısız)
+          HITS = [0.22, 0.43, 0.60, 0.73, 0.83, 0.90, 0.95]
+          AMPS = [1, 0.62, 0.42, 0.3, 0.2, 0.13, 0.08]
+          for i in range(1, 4):
+              x = buf(1.2)
+              for die, off in [(0, 0.0), (1, 0.03)]:
+                  for h, a in zip(HITS, AMPS):
+                      at = h + off + rng.uniform(-0.01, 0.015)
+                      add(x, landing(0.12 + 0.3 * (1 - a)), at, a)
+              dry_save(f"throw_{i}.wav", x, 0.9)
 
-          # zarları bırakış: hava savrulması
-          x = buf(0.6)
-          n = int(SR * 0.4)
-          wh = rng.uniform(-1, 1, n)
-          seg = n // 10
-          sw = np.zeros(n)
-          for s_ in range(10):
-              f = 300 * (2600 / 300) ** (s_ / 9)
-              sw[s_ * seg:(s_ + 1) * seg] = band(wh, f * 0.7, f * 1.3)[s_ * seg:(s_ + 1) * seg]
-          add(x, sw * env(n, 0.15, 5) * 2, 0, 0.35)
-          save("release.wav", room(x, 0.3), peak=0.7)
+          # zarları bırakış: fincandan kayıp çıkış — kısa sürtünme, yankısız
+          x = buf(0.18)
+          n = int(SR * 0.12)
+          add(x, band(rng.uniform(-1, 1, n), 1800, 6000) * np.sin(np.linspace(0, np.pi, n)) ** 2, 0, 0.5)
+          add(x, strike(0.2, 0.6, 0.1, dur=0.05), 0.09, 0.5)
+          dry_save("release.wav", x, 0.55)
           BARBUT_EOF
           ls -R lib test
 
