@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum: tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 2): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -63,18 +63,35 @@ jobs:
               - assets/sounds/
           BARBUT_EOF
           cat > lib/main.dart <<'BARBUT_EOF'
+          import 'dart:async';
+
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
 
+          import 'errors.dart';
           import 'feel.dart';
           import 'palette.dart';
           import 'table_screen.dart';
 
-          Future<void> main() async {
-            WidgetsFlutterBinding.ensureInitialized();
-            await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-            await Feel.I.init();
-            runApp(const BarbutApp());
+          void main() {
+            runZonedGuarded(() async {
+              WidgetsFlutterBinding.ensureInitialized();
+              FlutterError.onError = (details) {
+                FlutterError.presentError(details);
+                ErrorLog.add(details.exception, details.stack);
+              };
+              try {
+                await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+              try {
+                await Feel.I.init().timeout(const Duration(seconds: 3));
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+              runApp(const BarbutApp());
+            }, (e, s) => ErrorLog.add(e, s));
           }
 
           class BarbutApp extends StatelessWidget {
@@ -97,6 +114,24 @@ jobs:
                 home: const TableScreen(),
               );
             }
+          }
+          BARBUT_EOF
+          cat > lib/errors.dart <<'BARBUT_EOF'
+          import 'package:flutter/foundation.dart';
+
+          /// Uygulama içindeki hataları ekranda göstermek için toplar.
+          class ErrorLog {
+            static final ValueNotifier<List<String>> items = ValueNotifier<List<String>>(const []);
+
+            static void add(Object error, [StackTrace? stack]) {
+              final first = error.toString().split('\n').first;
+              final where = (stack?.toString() ?? '').split('\n').where((l) => l.trim().isNotEmpty).take(3).join('\n');
+              final list = [...items.value, where.isEmpty ? first : '$first\n$where'];
+              items.value = list.length > 5 ? list.sublist(list.length - 5) : list;
+              debugPrint('BARBUT HATA: $error\n$stack');
+            }
+
+            static void clear() => items.value = const [];
           }
           BARBUT_EOF
           cat > lib/palette.dart <<'BARBUT_EOF'
@@ -210,6 +245,7 @@ jobs:
           import 'package:flutter/services.dart';
           import 'package:vibration/vibration.dart';
 
+          import 'errors.dart';
           import 'game.dart';
 
           typedef _IosHaptic = Future<void> Function();
@@ -231,12 +267,9 @@ jobs:
             bool hapticsOn = true;
 
             final _rng = Random();
-            final List<AudioPlayer> _ticks = List.generate(4, (_) => AudioPlayer());
+            List<AudioPlayer> _ticks = [];
             int _tickIndex = 0;
-            final _cup = AudioPlayer();
-            final _throw = AudioPlayer();
-            final _result = AudioPlayer();
-            final _final = AudioPlayer();
+            AudioPlayer? _cup, _throw, _result, _final;
             final List<Timer> _timers = [];
 
             bool _canVibrate = false;
@@ -244,9 +277,29 @@ jobs:
 
             Future<void> init() async {
               try {
+                _ticks = List.generate(4, (_) => AudioPlayer());
+                _cup = AudioPlayer();
+                _throw = AudioPlayer();
+                _result = AudioPlayer();
+                _final = AudioPlayer();
+              } catch (e, s) {
+                soundOn = false;
+                ErrorLog.add(e, s);
+              }
+              try {
                 _canVibrate = (await Vibration.hasVibrator()) == true;
                 _amplitude = (await Vibration.hasAmplitudeControl()) == true;
-              } catch (_) {}
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+            }
+
+            Future<void> _guard(Future<void> Function() fn) async {
+              try {
+                await fn();
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
             }
 
             void cancel() {
@@ -259,13 +312,14 @@ jobs:
             void _at(int ms, void Function() fn) =>
                 _timers.add(Timer(Duration(milliseconds: ms), fn));
 
-            Future<void> _play(AudioPlayer p, String asset,
+            Future<void> _play(AudioPlayer? p, String asset,
                 {double volume = 1, PlayerMode mode = PlayerMode.mediaPlayer}) async {
-              if (!soundOn) return;
+              if (!soundOn || p == null) return;
+              final AudioPlayer player = p;
               try {
-                await p.stop();
-                await p.play(AssetSource(asset), volume: volume, mode: mode);
+                await player.stop();
               } catch (_) {}
+              await _guard(() => player.play(AssetSource(asset), volume: volume, mode: mode));
             }
 
             /// Tek bir titreşim darbesi. Android'de süre + güç (1-255),
@@ -273,19 +327,19 @@ jobs:
             void _hit(int ms, int amplitude, _IosHaptic ios) {
               if (!hapticsOn) return;
               if (Platform.isIOS || !_canVibrate) {
-                ios();
+                _guard(ios);
                 return;
               }
               if (_amplitude) {
-                Vibration.vibrate(duration: ms, amplitude: amplitude.clamp(1, 255));
+                _guard(() => Vibration.vibrate(duration: ms, amplitude: amplitude.clamp(1, 255)));
               } else {
-                Vibration.vibrate(duration: ms);
+                _guard(() => Vibration.vibrate(duration: ms));
               }
             }
 
             /// Telefon sallanırken zarın kupada çarpması.
             void tick(double power) {
-              final p = _ticks[_tickIndex++ % _ticks.length];
+              final p = _ticks.isEmpty ? null : _ticks[_tickIndex++ % _ticks.length];
               _play(p, 'sounds/tick_${1 + _rng.nextInt(4)}.wav',
                   volume: (0.45 + power / 40).clamp(0.4, 1.0), mode: PlayerMode.lowLatency);
               _hit(14, (70 + power * 5).round().clamp(60, 200), HapticFeedback.selectionClick);
@@ -338,8 +392,8 @@ jobs:
                   _at(tr + 170, () => _hit(90, 255, HapticFeedback.heavyImpact));
                 case Outcome.lose: // uzun, ağır bir gong titreşimi
                   _at(tr, () => _hit(240, 255, HapticFeedback.heavyImpact));
-                  _at(tr + 110, () { if (Platform.isIOS) HapticFeedback.heavyImpact(); });
-                  _at(tr + 230, () { if (Platform.isIOS) HapticFeedback.mediumImpact(); });
+                  _at(tr + 110, () { if (Platform.isIOS) _guard(HapticFeedback.heavyImpact); });
+                  _at(tr + 230, () { if (Platform.isIOS) _guard(HapticFeedback.mediumImpact); });
                 case Outcome.pass:
                   _at(tr, () => _hit(18, 90, HapticFeedback.lightImpact));
               }
@@ -359,6 +413,8 @@ jobs:
 
           import 'package:sensors_plus/sensors_plus.dart';
 
+          import 'errors.dart';
+
           /// Telefonu kupa gibi sallamayı algılar. Sallarken [onRattle],
           /// sallama bitince (kısa bir duraksama) [onRelease] çağrılır: zar atılır.
           class ShakeDetector {
@@ -374,8 +430,12 @@ jobs:
             DateTime _start = DateTime(0), _last = DateTime(0), _lastTick = DateTime(0);
 
             void start() {
-              _sub ??= userAccelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)
-                  .listen(_onEvent, onError: (Object _) {});
+              try {
+                _sub ??= userAccelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)
+                    .listen(_onEvent, onError: (Object e, StackTrace s) => ErrorLog.add(e, s));
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
             }
 
             void stop() {
@@ -656,6 +716,7 @@ jobs:
           import 'package:flutter/material.dart';
 
           import 'die.dart';
+          import 'errors.dart';
           import 'feel.dart';
           import 'game.dart';
           import 'palette.dart';
@@ -747,6 +808,7 @@ jobs:
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
                     children: [
                       _topBar(),
+                      _errors(),
                       const SizedBox(height: 12),
                       Row(children: [
                         Expanded(child: _plaque(0)),
@@ -768,6 +830,33 @@ jobs:
                 ),
               );
             }
+
+            Widget _errors() => ValueListenableBuilder<List<String>>(
+                  valueListenable: ErrorLog.items,
+                  builder: (context, list, _) {
+                    if (list.isEmpty) return const SizedBox.shrink();
+                    return Container(
+                      margin: const EdgeInsets.only(top: 8),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0x33EE7B8C),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Palette.lose),
+                      ),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [
+                          const Expanded(
+                            child: Text('Bir hata oluştu. Bu kutunun fotoğrafını gönder:',
+                                style: TextStyle(color: Palette.ink, fontWeight: FontWeight.w700)),
+                          ),
+                          TextButton(onPressed: ErrorLog.clear, child: const Text('Kapat')),
+                        ]),
+                        SelectableText(list.join('\n\n'),
+                            style: const TextStyle(color: Palette.ink, fontSize: 12, fontFamily: 'monospace')),
+                      ]),
+                    );
+                  },
+                );
 
             Widget _title(String t) => Padding(
                   padding: const EdgeInsets.only(bottom: 10),
@@ -1245,18 +1334,27 @@ jobs:
         run: |
           pip install numpy scipy
           python tool/make_sounds.py
+          ls -la assets/sounds
 
       - name: Titreşim izni ve uygulama adı
         working-directory: barbut_app
         run: |
           M=android/app/src/main/AndroidManifest.xml
-          grep -q 'android.permission.VIBRATE' "$M" || \
-            sed -i 's#<manifest xmlns:android="http://schemas.android.com/apk/res/android">#&\n    <uses-permission android:name="android.permission.VIBRATE"/>#' "$M"
+          if ! grep -q 'android.permission.VIBRATE' "$M"; then
+            sed -i '0,/<application/s##<uses-permission android:name="android.permission.VIBRATE"/>\n    <application#' "$M"
+          fi
           sed -i 's#android:label="barbut"#android:label="Barbut"#' "$M"
+          cat "$M"
+          grep -q 'android.permission.VIBRATE' "$M" || { echo "VIBRATE izni eklenemedi"; exit 1; }
 
       - name: Paketleri indir
         working-directory: barbut_app
         run: flutter pub get
+
+      - name: Kod kontrolü (yalnızca bilgi)
+        working-directory: barbut_app
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings lib
 
       - name: Kural testleri
         working-directory: barbut_app
