@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 14: Barbut logosu uygulama ikonu oldu): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 15: yeni kural — yüksek atan kazanır): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -174,32 +174,50 @@ jobs:
           cat > lib/game.dart <<'BARBUT_EOF'
           import 'dart:math';
 
-          enum Outcome { win, lose, pass }
+          /// Bir atışın sonucu.
+          /// [first]: elin ilk atışı, hedefi belirler (akçe değişmez).
+          /// [win]:   ikinci atan hedefi geçti, akçeyi o alır.
+          /// [lose]:  ikinci atan hedefin altında kaldı, akçeyi ilk atan alır.
+          /// [tie]:   ikinci atan hedefe eşit attı, berabere: akçe değişmez.
+          enum Outcome { first, win, lose, tie }
 
-          /// Bir zar atışı. [by] atan oyuncu (0 ya da 1), [amount] el değiştiren akçe.
+          /// Bir zar atışı. [by] atan oyuncu (0 ya da 1), [amount] el değiştiren akçe,
+          /// [target] ikinci atışta geçilmesi gereken sayı (ilk atışta null).
           class Roll {
-            const Roll(this.d1, this.d2, this.by, this.out, this.amount);
+            const Roll(this.d1, this.d2, this.by, this.out, this.amount, {this.target});
             final int d1, d2, by, amount;
             final Outcome out;
+            final int? target;
+
+            int get sum => d1 + d2;
+
+            /// Akçeyi alan oyuncu (berabere ya da ilk atışta null).
+            int? get taker => switch (out) {
+                  Outcome.win => by,
+                  Outcome.lose => 1 - by,
+                  _ => null,
+                };
           }
 
-          const _winning = {'6-6', '5-5', '3-3', '6-5'};
-          const _losing = {'1-1', '2-2', '4-4', '2-1'};
+          /// Hedefe göre ikinci atışın sonucu.
+          Outcome judge(int sum, int target) => sum > target
+              ? Outcome.win
+              : sum < target
+                  ? Outcome.lose
+                  : Outcome.tie;
 
-          Outcome judge(int a, int b) {
-            final key = '${max(a, b)}-${min(a, b)}';
-            if (_winning.contains(key)) return Outcome.win;
-            if (_losing.contains(key)) return Outcome.lose;
-            return Outcome.pass;
-          }
-
+          /// Kurallar: her el iki atıştır. İlk atan bir sayı atar (iki zarın toplamı),
+          /// o sayı hedef olur. Rakibi daha yüksek atarsa akçeyi o alır, daha düşük
+          /// atarsa ilk atan alır, eşitse berabere. Her elde ilk atan sırayla değişir.
           class Game {
             static const start = 100;
             static const stake = 10;
 
             final List<int> akce = [start, start];
             final List<Roll> log = [];
-            int turn = 0;
+            int turn = 0; // sıradaki atan
+            int starter = 0; // bu elde ilk atan
+            int? target; // bu elin hedefi (ilk atış yapıldıysa)
             int? winner;
             final Random _rng = Random.secure();
 
@@ -208,33 +226,44 @@ jobs:
             /// Zarı atar ama sonucu henüz uygulamaz: animasyon bitince [apply] çağrılır.
             Roll draw() {
               final d1 = _rng.nextInt(6) + 1, d2 = _rng.nextInt(6) + 1;
-              final s = turn, o = 1 - turn, out = judge(d1, d2);
+              return rollFor(d1, d2);
+            }
+
+            /// Verilen zarlarla, şu anki duruma göre atış (testler için de).
+            Roll rollFor(int d1, int d2) {
+              final s = turn, o = 1 - turn, t = target;
+              if (t == null) return Roll(d1, d2, s, Outcome.first, 0);
+              final out = judge(d1 + d2, t);
               final amount = switch (out) {
                 Outcome.win => min(stake, akce[o]),
                 Outcome.lose => min(stake, akce[s]),
-                Outcome.pass => 0,
+                _ => 0,
               };
-              return Roll(d1, d2, s, out, amount);
+              return Roll(d1, d2, s, out, amount, target: t);
             }
 
             bool endsGame(Roll r) {
-              if (r.out == Outcome.pass) return false;
-              final loser = r.out == Outcome.win ? 1 - r.by : r.by;
-              return akce[loser] - r.amount <= 0;
+              final taker = r.taker;
+              if (taker == null) return false;
+              return akce[1 - taker] - r.amount <= 0;
             }
 
             void apply(Roll r) {
-              final o = 1 - r.by;
-              if (r.out == Outcome.win) {
-                akce[o] -= r.amount;
-                akce[r.by] += r.amount;
-              } else if (r.out == Outcome.lose) {
-                akce[r.by] -= r.amount;
-                akce[o] += r.amount;
+              final taker = r.taker;
+              if (taker != null) {
+                akce[1 - taker] -= r.amount;
+                akce[taker] += r.amount;
               }
               log.insert(0, r);
               if (log.length > 12) log.removeLast();
-              turn = o; // zar her atıştan sonra rakibe geçer
+              if (r.out == Outcome.first) {
+                target = r.sum;
+                turn = 1 - r.by; // hedefi geçmek için rakip atar
+              } else {
+                target = null;
+                starter = 1 - starter; // yeni el: ilk atan sırayla değişir
+                turn = starter;
+              }
               if (akce[0] <= 0) winner = 1;
               if (akce[1] <= 0) winner = 0;
             }
@@ -243,10 +272,22 @@ jobs:
               final w = winner;
               akce[0] = start;
               akce[1] = start;
-              turn = w == null ? 0 : 1 - w; // kaybeden başlar
+              starter = w == null ? 0 : 1 - w; // kaybeden başlar
+              turn = starter;
+              target = null;
               winner = null;
               log.clear();
             }
+          }
+
+          /// Hedefe göre ikinci atanın bilmesi gerekenler, kısa cümlelerle.
+          String targetHint(int t) {
+            final parts = <String>[
+              t < 12 ? '${t + 1} ve üstü kazanır' : '12\'yi geçmek imkânsız',
+              if (t > 2) '${t - 1} ve altı kaybeder',
+              '$t berabere',
+            ];
+            return parts.join(' · ');
           }
           BARBUT_EOF
           cat > lib/sound.dart <<'BARBUT_EOF'
@@ -442,7 +483,7 @@ jobs:
                 _play(switch (out) {
                   Outcome.win => 'win',
                   Outcome.lose => 'lose',
-                  Outcome.pass => 'pass',
+                  Outcome.first || Outcome.tie => 'pass',
                 });
               });
               switch (out) {
@@ -454,7 +495,8 @@ jobs:
                   _at(tr, () => _hit(240, 255, HapticFeedback.heavyImpact));
                   _at(tr + 110, () { if (Platform.isIOS) _guard(HapticFeedback.heavyImpact); });
                   _at(tr + 230, () { if (Platform.isIOS) _guard(HapticFeedback.mediumImpact); });
-                case Outcome.pass:
+                case Outcome.first:
+                case Outcome.tie:
                   _at(tr, () => _hit(18, 90, HapticFeedback.lightImpact));
               }
               if (finalRoll) {
@@ -1891,7 +1933,7 @@ jobs:
                   verdictAbove = avgY > t.size.height * 0.5;
                   verdictOn = true;
                 });
-                Feel.I.playResult(fellNow > 0 ? Outcome.pass : r.out, finalRoll: ends);
+                Feel.I.playResult(fellNow > 0 ? Outcome.tie : r.out, finalRoll: ends);
                 _timer = Timer(const Duration(milliseconds: 1500), () {
                   if (!mounted || game.over) return;
                   cup.reset();
@@ -1938,7 +1980,7 @@ jobs:
                   final pad = MediaQuery.paddingOf(context);
                   table!
                     ..topInset = pad.top + 128
-                    ..bottomInset = pad.bottom + 130;
+                    ..bottomInset = pad.bottom + 170;
                   final diceOpacity = (phase == Phase.holding || phase == Phase.released) ? (diceOnTable ? 1.0 : 0.0) : 1.0;
                   return GestureDetector(
                     behavior: HitTestBehavior.opaque,
@@ -2043,13 +2085,22 @@ jobs:
                                 const Color(0xFFF2D58A),
                               )
                             : switch (r.out) {
-                                Outcome.win => ('Barbut!', '$who $dice attı · ${r.amount} akçe kazandı', const Color(0xFFB8F0D2)),
+                                Outcome.first => (
+                                    'Hedef ${r.sum}',
+                                    '$who $dice attı · şimdi ${2 - r.by}. oyuncu geçmeye çalışacak',
+                                    const Color(0xFFF2D58A)
+                                  ),
+                                Outcome.win => (
+                                    'Geçti!',
+                                    '$who ${r.sum} attı · hedef ${r.target} geçildi · ${r.amount} akçe kazandı',
+                                    const Color(0xFFB8F0D2)
+                                  ),
                                 Outcome.lose => (
-                                    'Kaybettiren atış',
-                                    '$who $dice attı · ${r.amount} akçe kaybetti',
+                                    'Geçemedi',
+                                    '$who ${r.sum} attı · hedef ${r.target} geçilemedi · ${2 - r.by}. oyuncu ${r.amount} akçe kazandı',
                                     const Color(0xFFFFB3BF)
                                   ),
-                                Outcome.pass => ('Sonuçsuz', '$who $dice attı · zar rakibe geçti', Palette.ink),
+                                Outcome.tie => ('Berabere', '$who da ${r.sum} attı · akçe el değiştirmedi', Palette.ink),
                               };
                         const glow = [Shadow(color: Color(0xE6000000), blurRadius: 18)];
                         return Align(
@@ -2078,9 +2129,10 @@ jobs:
               final (String what, Color color) = fell > 0
                   ? ('zar düştü, sayılmaz', const Color(0xFFF2D58A))
                   : switch (r.out) {
-                      Outcome.win => ('kazandı +${r.amount}', Palette.win),
-                      Outcome.lose => ('kaybetti −${r.amount}', Palette.lose),
-                      Outcome.pass => ('sonuçsuz', const Color(0xB3E9E1CE)),
+                      Outcome.first => ('hedef ${r.sum}', const Color(0xFFF2D58A)),
+                      Outcome.win => ('${r.sum} · geçti +${r.amount}', Palette.win),
+                      Outcome.lose => ('${r.sum} · geçemedi −${r.amount}', Palette.lose),
+                      Outcome.tie => ('${r.sum} · berabere', const Color(0xB3E9E1CE)),
                     };
               return Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -2123,8 +2175,12 @@ jobs:
               final throwing = phase == Phase.released || phase == Phase.flying;
               final turn = throwing ? '${game.turn + 1}. oyuncu atıyor' : 'Sıra ${game.turn + 1}. oyuncuda';
               final vessel = cup.palm ? 'Zarlar avucunda' : 'Zarlar fincanda';
+              final target = game.target;
               final String hint;
-              if (phase != Phase.holding) {
+              if (target != null) {
+                // ikinci atan neyi atarsa ne olacağını her an görsün
+                hint = targetHint(target);
+              } else if (phase != Phase.holding) {
                 hint = '';
               } else if (!sensorsOk) {
                 hint = 'Atmak için ekranda aşağıdan yukarı kaydır.';
@@ -2139,6 +2195,18 @@ jobs:
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(32, 0, 32, 36),
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    if (target != null)
+                      Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: const Color(0x8C000000),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: const Color(0x80D4B158)),
+                        ),
+                        child: Text('Hedef $target',
+                            style: const TextStyle(fontFamily: Palette.display, fontSize: 22, color: Color(0xFFF2D58A))),
+                      ),
                     Text(
                       turn,
                       textAlign: TextAlign.center,
@@ -2496,39 +2564,31 @@ jobs:
           class RulesLegend extends StatelessWidget {
             const RulesLegend({super.key});
 
-            Widget _pair(int a, int b) => Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: const Color(0x24D4B158),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    DieFace(value: a, size: 26, shadow: false),
-                    const SizedBox(width: 4),
-                    DieFace(value: b, size: 26, shadow: false),
+            Widget _step(String n, String text) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Container(
+                      width: 26,
+                      height: 26,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(color: const Color(0x33D4B158), borderRadius: BorderRadius.circular(13)),
+                      child: Text(n, style: const TextStyle(color: Palette.gold, fontWeight: FontWeight.w700)),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(child: Text(text, style: const TextStyle(color: Palette.ink, height: 1.4))),
                   ]),
-                );
-
-            Widget _group(String title, Color color, List<List<int>> pairs) => Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title, style: TextStyle(color: color, fontWeight: FontWeight.w700)),
-                    const SizedBox(height: 8),
-                    Wrap(spacing: 10, runSpacing: 10, children: [for (final p in pairs) _pair(p[0], p[1])]),
-                  ],
                 );
 
             @override
             Widget build(BuildContext context) => Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _group('Atana kazandırır', Palette.win, const [[6, 6], [5, 5], [3, 3], [6, 5]]),
-                    const SizedBox(height: 18),
-                    _group('Atana kaybettirir', Palette.lose, const [[1, 1], [2, 2], [4, 4], [1, 2]]),
-                    const SizedBox(height: 14),
+                    _step('1', 'İlk oyuncu iki zarı atar. Gelen iki sayının toplamı hedef olur; örneğin 5 ve 3 → hedef 8.'),
+                    _step('2', 'Rakibi atar. Hedeften yüksek atarsa 10 akçeyi o alır, düşük atarsa ilk atan alır, eşitse berabere.'),
+                    _step('3', 'Yeni elde ilk atan sırayla değişir.'),
+                    const SizedBox(height: 4),
                     const Text(
-                      'Her oyuncu 100 akçeyle başlar, her karar 10 akçedir. Diğer atışlar sonuçsuzdur. '
-                      'Zar her atıştan sonra rakibe geçer. Masadan düşen zar atışı geçersiz kılar, '
+                      'Her oyuncu 100 akçeyle başlar. Masadan düşen zar atışı geçersiz kılar, '
                       'aynı oyuncu yeniden atar. Akçesi biten masadan kalkar.',
                       style: TextStyle(color: Palette.muted, height: 1.45),
                     ),
@@ -2712,9 +2772,9 @@ jobs:
               final active = !game.over && game.turn == i;
               Color amountColor = Palette.ink;
               final s = shown;
-              if (verdictOn && s != null && s.out != Outcome.pass) {
-                final winnerSeat = s.out == Outcome.win ? s.by : 1 - s.by;
-                amountColor = winnerSeat == i ? Palette.win : Palette.lose;
+              final taker = s?.taker;
+              if (verdictOn && taker != null) {
+                amountColor = taker == i ? Palette.win : Palette.lose;
               }
               final tag = game.winner == i ? 'Masanın galibi' : (active ? 'Zar onda' : '');
               return AnimatedContainer(
@@ -2788,9 +2848,10 @@ jobs:
               if (r == null) return const SizedBox(height: 44);
               final who = '${r.by + 1}. oyuncu';
               final (String title, String sub, Color color) = switch (r.out) {
-                Outcome.win => ('Barbut!', '$who ${r.amount} akçe kazandı', const Color(0xFF9FE0BE)),
-                Outcome.lose => ('Kaybettiren atış', '$who ${r.amount} akçe kaybetti', const Color(0xFFF49AA8)),
-                Outcome.pass => ('Sonuçsuz', 'Zar rakibe geçti', Palette.ink),
+                Outcome.first => ('Hedef ${r.sum}', '$who ${r.sum} attı · rakip geçmeye çalışacak', Palette.gold),
+                Outcome.win => ('Geçti!', '$who ${r.sum} attı · ${r.amount} akçe kazandı', const Color(0xFF9FE0BE)),
+                Outcome.lose => ('Geçemedi', '$who ${r.sum} attı · ${r.amount} akçe kaybetti', const Color(0xFFF49AA8)),
+                Outcome.tie => ('Berabere', '$who da ${r.sum} attı', Palette.ink),
               };
               return Column(children: [
                 Text(title, style: TextStyle(fontFamily: Palette.display, fontSize: 24, color: color)),
@@ -2855,15 +2916,17 @@ jobs:
                       Expanded(child: Text('${r.by + 1}. oyuncu', style: const TextStyle(color: Palette.ink))),
                       Text(
                         switch (r.out) {
+                          Outcome.first => 'hedef ${r.sum}',
                           Outcome.win => '+${r.amount}',
                           Outcome.lose => '−${r.amount}',
-                          Outcome.pass => 'sonuçsuz',
+                          Outcome.tie => 'berabere',
                         },
                         style: TextStyle(
                           color: switch (r.out) {
+                            Outcome.first => Palette.gold,
                             Outcome.win => Palette.win,
                             Outcome.lose => Palette.lose,
-                            Outcome.pass => Palette.muted,
+                            Outcome.tie => Palette.muted,
                           },
                         ),
                       ),
@@ -2917,26 +2980,51 @@ jobs:
           import 'package:barbut/game.dart';
 
           void main() {
-            test('kazandıran atışlar', () {
-              for (final p in [[6, 6], [5, 5], [3, 3], [6, 5], [5, 6]]) {
-                expect(judge(p[0], p[1]), Outcome.win);
-              }
+            test('yüksek atan kazanır, düşük atan kaybeder, eşit berabere', () {
+              expect(judge(9, 8), Outcome.win);
+              expect(judge(7, 8), Outcome.lose);
+              expect(judge(8, 8), Outcome.tie);
             });
-            test('kaybettiren atışlar', () {
-              for (final p in [[1, 1], [2, 2], [4, 4], [1, 2], [2, 1]]) {
-                expect(judge(p[0], p[1]), Outcome.lose);
-              }
-            });
-            test('sonuçsuz atışlar', () {
-              for (final p in [[6, 1], [3, 4], [5, 2], [6, 4]]) {
-                expect(judge(p[0], p[1]), Outcome.pass);
-              }
-            });
-            test('akçe el değiştirir, zar rakibe geçer', () {
+
+            test('ilk atış hedefi belirler, akçe değişmez, sıra rakibe geçer', () {
               final g = Game();
-              g.apply(const Roll(6, 6, 0, Outcome.win, 10));
-              expect(g.akce, [110, 90]);
+              final r = g.rollFor(5, 3);
+              expect(r.out, Outcome.first);
+              g.apply(r);
+              expect(g.target, 8);
               expect(g.turn, 1);
+              expect(g.akce, [100, 100]);
+            });
+
+            test('ikinci atan hedefi geçerse akçeyi alır', () {
+              final g = Game();
+              g.apply(g.rollFor(5, 3));
+              final r = g.rollFor(6, 4);
+              expect(r.out, Outcome.win);
+              g.apply(r);
+              expect(g.akce, [90, 110]);
+              expect(g.target, null);
+              expect(g.turn, 1); // yeni elde ilk atan değişti
+            });
+
+            test('ikinci atan düşük atarsa akçeyi ilk atan alır', () {
+              final g = Game();
+              g.apply(g.rollFor(5, 3));
+              g.apply(g.rollFor(2, 1));
+              expect(g.akce, [110, 90]);
+            });
+
+            test('berabere: akçe değişmez', () {
+              final g = Game();
+              g.apply(g.rollFor(5, 3));
+              g.apply(g.rollFor(4, 4));
+              expect(g.akce, [100, 100]);
+            });
+
+            test('ipucu metni', () {
+              expect(targetHint(8), '9 ve üstü kazanır · 7 ve altı kaybeder · 8 berabere');
+              expect(targetHint(12), '12\'yi geçmek imkânsız · 11 ve altı kaybeder · 12 berabere');
+              expect(targetHint(2), '3 ve üstü kazanır · 2 berabere');
             });
           }
           BARBUT_EOF
