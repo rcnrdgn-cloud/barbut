@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum: tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 4: SoLoud ses motoru): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -48,7 +48,7 @@ jobs:
           dependencies:
             flutter:
               sdk: flutter
-            audioplayers: ^6.1.0
+            flutter_soloud: ">=2.1.0 <4.0.0"
             sensors_plus: ^6.1.0
             vibration: ">=2.0.0 <4.0.0"
 
@@ -63,18 +63,47 @@ jobs:
               - assets/sounds/
           BARBUT_EOF
           cat > lib/main.dart <<'BARBUT_EOF'
+          import 'dart:async';
+
           import 'package:flutter/material.dart';
           import 'package:flutter/services.dart';
 
+          import 'errors.dart';
           import 'feel.dart';
+          import 'hand_feel.dart';
+          import 'hand_screen.dart';
           import 'palette.dart';
-          import 'table_screen.dart';
+          import 'sound.dart';
 
-          Future<void> main() async {
-            WidgetsFlutterBinding.ensureInitialized();
-            await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-            await Feel.I.init();
-            runApp(const BarbutApp());
+          void main() {
+            runZonedGuarded(() async {
+              WidgetsFlutterBinding.ensureInitialized();
+              FlutterError.onError = (details) {
+                FlutterError.presentError(details);
+                ErrorLog.add(details.exception, details.stack);
+              };
+              try {
+                await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+              try {
+                await SoundEngine.I.init().timeout(const Duration(seconds: 8));
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+              try {
+                await Feel.I.init().timeout(const Duration(seconds: 3));
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+              try {
+                await ImpactFeel.I.init().timeout(const Duration(seconds: 3));
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+              runApp(const BarbutApp());
+            }, (e, s) => ErrorLog.add(e, s));
           }
 
           class BarbutApp extends StatelessWidget {
@@ -94,9 +123,28 @@ jobs:
                     onSurface: Palette.ink,
                   ),
                 ),
-                home: const TableScreen(),
+                home: const HandScreen(),
               );
             }
+          }
+          BARBUT_EOF
+          cat > lib/errors.dart <<'BARBUT_EOF'
+          import 'package:flutter/foundation.dart';
+
+          /// Uygulama içindeki hataları ekranda göstermek için toplar.
+          class ErrorLog {
+            static final ValueNotifier<List<String>> items = ValueNotifier<List<String>>(const []);
+
+            static void add(Object error, [StackTrace? stack]) {
+              final first = error.toString().split('\n').first;
+              final where = (stack?.toString() ?? '').split('\n').where((l) => l.trim().isNotEmpty).take(3).join('\n');
+              if (items.value.any((x) => x.startsWith(first))) return; // aynı hatayı tekrar yazma
+              final list = [...items.value, where.isEmpty ? first : '$first\n$where'];
+              items.value = list.length > 5 ? list.sublist(list.length - 5) : list;
+              debugPrint('BARBUT HATA: $error\n$stack');
+            }
+
+            static void clear() => items.value = const [];
           }
           BARBUT_EOF
           cat > lib/palette.dart <<'BARBUT_EOF'
@@ -201,16 +249,69 @@ jobs:
             }
           }
           BARBUT_EOF
+          cat > lib/sound.dart <<'BARBUT_EOF'
+          import 'dart:async';
+
+          import 'package:flutter_soloud/flutter_soloud.dart';
+
+          import 'errors.dart';
+
+          /// Oyun sesi motoru (SoLoud): kısa sesleri gecikmesiz, üst üste ve
+          /// sağ/sol yönlü çalar. Bütün sesler açılışta belleğe yüklenir.
+          class SoundEngine {
+            SoundEngine._();
+            static final SoundEngine I = SoundEngine._();
+
+            static const names = [
+              'clack_1', 'clack_2', 'cup_1', 'cup_2', 'cup_hit_1', 'cup_hit_2', 'cup_hit_3', 'cup_hit_4',
+              'final', 'lose', 'palm_1', 'palm_2', 'palm_3', 'palm_4', 'pass', 'rail_1', 'rail_2',
+              'release', 'table_hit_1', 'table_hit_2', 'table_hit_3', 'table_hit_4', 'table_tick_1',
+              'table_tick_2', 'table_tick_3', 'throw_1', 'throw_2', 'throw_3', 'tick_1', 'tick_2',
+              'tick_3', 'tick_4', 'win',
+            ];
+
+            final Map<String, AudioSource> _sources = {};
+            bool get ready => _sources.isNotEmpty;
+
+            Future<void> init() async {
+              try {
+                await SoLoud.instance.init();
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+                return;
+              }
+              for (final n in names) {
+                try {
+                  _sources[n] = await SoLoud.instance.loadAsset('assets/sounds/$n.wav');
+                } catch (e, s) {
+                  ErrorLog.add(e, s);
+                }
+              }
+            }
+
+            /// [pan]: -1 sol, 0 orta, 1 sağ.
+            void play(String name, {double volume = 1, double pan = 0}) {
+              final src = _sources[name];
+              if (src == null) return;
+              Future.sync(() => SoLoud.instance.play(
+                    src,
+                    volume: volume.clamp(0.0, 1.0),
+                    pan: pan.clamp(-1.0, 1.0),
+                  )).then((_) {}, onError: (Object e, StackTrace s) => ErrorLog.add(e, s));
+            }
+          }
+          BARBUT_EOF
           cat > lib/feel.dart <<'BARBUT_EOF'
           import 'dart:async';
           import 'dart:io' show Platform;
           import 'dart:math';
 
-          import 'package:audioplayers/audioplayers.dart';
           import 'package:flutter/services.dart';
           import 'package:vibration/vibration.dart';
 
+          import 'errors.dart';
           import 'game.dart';
+          import 'sound.dart';
 
           typedef _IosHaptic = Future<void> Function();
 
@@ -231,12 +332,6 @@ jobs:
             bool hapticsOn = true;
 
             final _rng = Random();
-            final List<AudioPlayer> _ticks = List.generate(4, (_) => AudioPlayer());
-            int _tickIndex = 0;
-            final _cup = AudioPlayer();
-            final _throw = AudioPlayer();
-            final _result = AudioPlayer();
-            final _final = AudioPlayer();
             final List<Timer> _timers = [];
 
             bool _canVibrate = false;
@@ -246,7 +341,17 @@ jobs:
               try {
                 _canVibrate = (await Vibration.hasVibrator()) == true;
                 _amplitude = (await Vibration.hasAmplitudeControl()) == true;
-              } catch (_) {}
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+            }
+
+            Future<void> _guard(Future<void> Function() fn) async {
+              try {
+                await fn();
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
             }
 
             void cancel() {
@@ -259,13 +364,9 @@ jobs:
             void _at(int ms, void Function() fn) =>
                 _timers.add(Timer(Duration(milliseconds: ms), fn));
 
-            Future<void> _play(AudioPlayer p, String asset,
-                {double volume = 1, PlayerMode mode = PlayerMode.mediaPlayer}) async {
+            void _play(String name, {double volume = 1}) {
               if (!soundOn) return;
-              try {
-                await p.stop();
-                await p.play(AssetSource(asset), volume: volume, mode: mode);
-              } catch (_) {}
+              SoundEngine.I.play(name, volume: volume);
             }
 
             /// Tek bir titreşim darbesi. Android'de süre + güç (1-255),
@@ -273,21 +374,19 @@ jobs:
             void _hit(int ms, int amplitude, _IosHaptic ios) {
               if (!hapticsOn) return;
               if (Platform.isIOS || !_canVibrate) {
-                ios();
+                _guard(ios);
                 return;
               }
               if (_amplitude) {
-                Vibration.vibrate(duration: ms, amplitude: amplitude.clamp(1, 255));
+                _guard(() => Vibration.vibrate(duration: ms, amplitude: amplitude.clamp(1, 255)));
               } else {
-                Vibration.vibrate(duration: ms);
+                _guard(() => Vibration.vibrate(duration: ms));
               }
             }
 
             /// Telefon sallanırken zarın kupada çarpması.
             void tick(double power) {
-              final p = _ticks[_tickIndex++ % _ticks.length];
-              _play(p, 'sounds/tick_${1 + _rng.nextInt(4)}.wav',
-                  volume: (0.45 + power / 40).clamp(0.4, 1.0), mode: PlayerMode.lowLatency);
+              _play('tick_${1 + _rng.nextInt(4)}', volume: (0.45 + power / 40).clamp(0.4, 1.0));
               _hit(14, (70 + power * 5).round().clamp(60, 200), HapticFeedback.selectionClick);
             }
 
@@ -296,14 +395,14 @@ jobs:
               final t0 = fromShake ? 0 : cupMs;
 
               if (!fromShake) {
-                _play(_cup, 'sounds/cup_${1 + _rng.nextInt(2)}.wav');
+                _play('cup_${1 + _rng.nextInt(2)}');
                 _at(0, () => _hit(55, 255, HapticFeedback.heavyImpact));
                 for (final t in const [90, 160, 215, 300, 355, 430, 490, 570, 625]) {
                   _at(t, () => _hit(16, 110, HapticFeedback.selectionClick));
                 }
               }
 
-              _at(t0, () => _play(_throw, 'sounds/throw_${1 + _rng.nextInt(3)}.wav'));
+              _at(t0, () => _play('throw_${1 + _rng.nextInt(3)}'));
 
               // tepsiye çarpmalar: [zaman, süre, güç]
               const bounces = [
@@ -323,33 +422,1169 @@ jobs:
                 _at(t0 + b[0], () => _hit(b[1], b[2], ios));
               }
 
-              final tr = t0 + 1080;
+              _scheduleResult(t0 + 1080, r.out, finalRoll);
+            }
+
+            /// Sonuç sesi + titreşimi hemen çalar (avuç modunda zarlar durunca).
+            void playResult(Outcome out, {bool finalRoll = false}) {
+              cancel();
+              _scheduleResult(0, out, finalRoll);
+            }
+
+            void _scheduleResult(int tr, Outcome out, bool finalRoll) {
               _at(tr, () {
-                _play(_result, switch (r.out) {
-                  Outcome.win => 'sounds/win.wav',
-                  Outcome.lose => 'sounds/lose.wav',
-                  Outcome.pass => 'sounds/pass.wav',
+                _play(switch (out) {
+                  Outcome.win => 'win',
+                  Outcome.lose => 'lose',
+                  Outcome.pass => 'pass',
                 });
               });
-              switch (r.out) {
+              switch (out) {
                 case Outcome.win: // üç kısa, sonuncusu dolgun
                   _at(tr, () => _hit(28, 200, HapticFeedback.mediumImpact));
                   _at(tr + 80, () => _hit(28, 200, HapticFeedback.mediumImpact));
                   _at(tr + 170, () => _hit(90, 255, HapticFeedback.heavyImpact));
                 case Outcome.lose: // uzun, ağır bir gong titreşimi
                   _at(tr, () => _hit(240, 255, HapticFeedback.heavyImpact));
-                  _at(tr + 110, () { if (Platform.isIOS) HapticFeedback.heavyImpact(); });
-                  _at(tr + 230, () { if (Platform.isIOS) HapticFeedback.mediumImpact(); });
+                  _at(tr + 110, () { if (Platform.isIOS) _guard(HapticFeedback.heavyImpact); });
+                  _at(tr + 230, () { if (Platform.isIOS) _guard(HapticFeedback.mediumImpact); });
                 case Outcome.pass:
                   _at(tr, () => _hit(18, 90, HapticFeedback.lightImpact));
               }
-
               if (finalRoll) {
-                _at(tr + 2400, () => _play(_final, 'sounds/final.wav'));
+                _at(tr + 2400, () => _play('final'));
                 for (final d in const [0, 90, 180, 270, 900]) {
                   _at(tr + 2400 + d, () => _hit(d == 900 ? 200 : 25, 255, HapticFeedback.heavyImpact));
                 }
               }
+            }
+          }
+          BARBUT_EOF
+          cat > lib/hand_feel.dart <<'BARBUT_EOF'
+          import 'dart:io' show Platform;
+          import 'dart:math';
+
+          import 'package:flutter/services.dart';
+          import 'package:vibration/vibration.dart';
+
+          import 'errors.dart';
+          import 'feel.dart';
+          import 'physics.dart';
+          import 'sound.dart';
+
+          /// Her tek çarpmanın sesi ve titreşimi; sertliği çarpmanın hızıyla orantılı.
+          class ImpactFeel {
+            ImpactFeel._();
+            static final ImpactFeel I = ImpactFeel._();
+
+            final _rng = Random();
+            bool _canVibrate = false, _amplitude = false;
+            DateTime _lastHaptic = DateTime(0), _lastSound = DateTime(0);
+            double _lastStrength = 0;
+
+            Future<void> init() async {
+              try {
+                _canVibrate = (await Vibration.hasVibrator()) == true;
+                _amplitude = (await Vibration.hasAmplitudeControl()) == true;
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+            }
+
+            Future<void> _guard(Future<void> Function() fn) async {
+              try {
+                await fn();
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+            }
+
+            String _pick(String base, int count) => '${base}_${1 + _rng.nextInt(count)}';
+
+            void _sound(String name, double volume, double pan) {
+              if (!Feel.I.soundOn) return;
+              final now = DateTime.now();
+              if (now.difference(_lastSound).inMilliseconds < 8 && volume < 0.6) return;
+              _lastSound = now;
+              SoundEngine.I.play(name, volume: volume, pan: pan * 0.7);
+            }
+
+            void _haptic(double strength, {int baseMs = 10}) {
+              if (!Feel.I.hapticsOn || strength <= 0) return;
+              final now = DateTime.now();
+              if (now.difference(_lastHaptic).inMilliseconds < 28 && strength < _lastStrength * 1.4) return;
+              _lastHaptic = now;
+              _lastStrength = strength;
+              if (Platform.isIOS || !_canVibrate) {
+                final Future<void> Function() f = strength > 0.66
+                    ? HapticFeedback.heavyImpact
+                    : strength > 0.33
+                        ? HapticFeedback.mediumImpact
+                        : strength > 0.12
+                            ? HapticFeedback.lightImpact
+                            : HapticFeedback.selectionClick;
+                _guard(f);
+                return;
+              }
+              final ms = (baseMs + 30 * strength).round();
+              final amp = (35 + 220 * strength).round().clamp(1, 255);
+              if (_amplitude) {
+                _guard(() => Vibration.vibrate(duration: ms, amplitude: amp));
+              } else {
+                _guard(() => Vibration.vibrate(duration: ms));
+              }
+            }
+
+            /// Zarlar elde / fincanda.
+            void cup(HitKind kind, double s, double pan, {required bool palm}) {
+              if (kind == HitKind.dice) {
+                _sound(_pick('clack', 2), 0.2 + 0.7 * s, pan);
+                _haptic(s * 0.8, baseMs: 6);
+                return;
+              }
+              if (palm) {
+                _sound(_pick('palm', 4), 0.25 + 0.75 * s, pan);
+                _haptic(s * 0.85, baseMs: 14);
+              } else {
+                _sound(_pick('cup_hit', 4), 0.2 + 0.8 * s, pan);
+                _haptic(s, baseMs: 8);
+              }
+            }
+
+            /// Zarlar masada.
+            void table(HitKind kind, double s, double pan) {
+              switch (kind) {
+                case HitKind.table:
+                  _sound(_pick('table_hit', 4), 0.25 + 0.75 * s, pan);
+                  _haptic(s, baseMs: 12);
+                case HitKind.tick:
+                  _sound(_pick('table_tick', 3), 0.15 + 0.6 * s, pan);
+                  _haptic(s * 0.6, baseMs: 6);
+                case HitKind.rail:
+                  _sound(_pick('rail', 2), 0.25 + 0.75 * s, pan);
+                  _haptic(s, baseMs: 14);
+                case HitKind.dice:
+                  _sound(_pick('clack', 2), 0.25 + 0.75 * s, pan);
+                  _haptic(s * 0.8, baseMs: 6);
+                case HitKind.settle:
+                  _haptic(0.15, baseMs: 6);
+                case HitKind.wall:
+                case HitKind.floor:
+                  break;
+              }
+            }
+
+            void release(double strength) {
+              _sound('release', 0.45 + 0.4 * strength.clamp(0.0, 1.0), 0);
+              _haptic(0.45, baseMs: 8);
+            }
+          }
+          BARBUT_EOF
+          cat > lib/physics.dart <<'BARBUT_EOF'
+          import 'dart:math';
+          import 'dart:ui' show Size;
+
+          enum HitKind { wall, floor, dice, table, tick, rail, settle }
+
+          /// [strength] 0..1 arası: çarpmanın ne kadar sert olduğu. [pan]: -1 sol, 1 sağ.
+          typedef HitFn = void Function(HitKind kind, double strength, double pan);
+
+          /* =====================================================================
+           *  ELDEKİ ZARLAR
+           *  Telefon bir kupa/avuç gibi düşünülür. Zarlar içeride serbestçe
+           *  hareket eder; ivmeölçerin ölçtüğü her hareket zarlara ters yönde
+           *  bir kuvvet olarak yansır (gerçek bir kupadaki gibi).
+           *  Birimler metre ve saniye; ivme m/s².
+           * ===================================================================== */
+          class CupSim {
+            CupSim({required this.onHit});
+
+            final HitFn onHit;
+            bool palm = false; // true: avuç içi (yumuşak), false: kahve fincanı (sert)
+
+            static const radius = 0.032; // kabın yarıçapı
+            static const height = 0.04; // kabın yüksekliği
+            static const die = 0.0085; // zarın yarı boyu
+
+            final List<_CupDie> dice = [_CupDie(-0.01, 0), _CupDie(0.01, 0)];
+            double ax = 0, ay = 0, az = 9.81;
+
+            /// Son sıfırlamadan beri kaç sert çarpma oldu (sallandı mı?).
+            int hardHits = 0;
+
+            void setAccel(double x, double y, double z) {
+              ax = x;
+              ay = y;
+              az = z;
+            }
+
+            void reset() {
+              hardHits = 0;
+              dice[0].place(-0.01, 0);
+              dice[1].place(0.01, 0);
+            }
+
+            /// Zarların ortalama yatay hızı: fırlatma yönüne katkı verir.
+            double get biasX => (dice[0].vx + dice[1].vx) / 2;
+
+            void step(double dt) {
+              const n = 4;
+              for (var i = 0; i < n; i++) {
+                _sub(dt / n);
+              }
+            }
+
+            void _sub(double dt) {
+              // Zarların telefona göre ivmesi = ölçülen ivmenin tersi.
+              final gx = -ax, gy = -ay, gz = -az;
+              final e = palm ? 0.22 : 0.55; // sekme katsayısı
+              final mu = palm ? 0.65 : 0.3; // sürtünme
+              const lim = radius - die;
+
+              for (final p in dice) {
+                p.vx += gx * dt;
+                p.vy += gy * dt;
+                p.vz += gz * dt;
+
+                final onFloor = p.z <= die + 1e-4 && gz < 0;
+                final onCeil = p.z >= height - die - 1e-4 && gz > 0;
+                if (onFloor || onCeil) {
+                  final sp = sqrt(p.vx * p.vx + p.vy * p.vy);
+                  final dec = mu * gz.abs() * dt;
+                  if (sp <= dec) {
+                    p.vx = 0;
+                    p.vy = 0;
+                  } else {
+                    p.vx -= p.vx / sp * dec;
+                    p.vy -= p.vy / sp * dec;
+                  }
+                }
+
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                p.z += p.vz * dt;
+
+                final d = sqrt(p.x * p.x + p.y * p.y);
+                if (d > lim) {
+                  final nx = p.x / d, ny = p.y / d;
+                  final vn = p.vx * nx + p.vy * ny;
+                  p.x = nx * lim;
+                  p.y = ny * lim;
+                  if (vn > 0) {
+                    p.vx -= (1 + e) * vn * nx;
+                    p.vy -= (1 + e) * vn * ny;
+                    _hit(HitKind.wall, vn, p.x / radius);
+                  }
+                }
+                if (p.z < die) {
+                  p.z = die;
+                  if (p.vz < 0) {
+                    final vn = -p.vz;
+                    p.vz = vn < 0.05 ? 0.0 : vn * e;
+                    _hit(HitKind.floor, vn, p.x / radius);
+                  }
+                }
+                if (p.z > height - die) {
+                  p.z = height - die;
+                  if (p.vz > 0) {
+                    final vn = p.vz;
+                    p.vz = vn < 0.05 ? 0.0 : -vn * e;
+                    _hit(HitKind.floor, vn, p.x / radius);
+                  }
+                }
+              }
+
+              // zar-zar çarpışması
+              final a = dice[0], b = dice[1];
+              final dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+              final dist = sqrt(dx * dx + dy * dy + dz * dz);
+              const minD = die * 2;
+              if (dist < minD && dist > 1e-6) {
+                final nx = dx / dist, ny = dy / dist, nz = dz / dist;
+                final push = (minD - dist) / 2;
+                a.x -= nx * push;
+                a.y -= ny * push;
+                a.z -= nz * push;
+                b.x += nx * push;
+                b.y += ny * push;
+                b.z += nz * push;
+                final rel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny + (b.vz - a.vz) * nz;
+                if (rel < 0) {
+                  final j = -(1 + e) * rel / 2;
+                  a.vx -= j * nx;
+                  a.vy -= j * ny;
+                  a.vz -= j * nz;
+                  b.vx += j * nx;
+                  b.vy += j * ny;
+                  b.vz += j * nz;
+                  _hit(HitKind.dice, -rel, (a.x + b.x) / 2 / radius);
+                }
+              }
+            }
+
+            void _hit(HitKind kind, double vn, double pan) {
+              if (vn < 0.07) return;
+              if (vn > 0.7) hardHits++; // gerçekten sallandı
+              onHit(kind, (vn / 1.6).clamp(0.0, 1.0), pan.clamp(-1.0, 1.0));
+            }
+          }
+
+          class _CupDie {
+            _CupDie(this.x, this.y);
+            double x, y, z = CupSim.die, vx = 0, vy = 0, vz = 0;
+
+            void place(double nx, double ny) {
+              x = nx;
+              y = ny;
+              z = CupSim.die;
+              vx = 0;
+              vy = 0;
+              vz = 0;
+            }
+          }
+
+          /* =====================================================================
+           *  MASADAKİ ZARLAR
+           *  Ekran, yukarıdan bakılan ahşap masadır. Birimler piksel.
+           *  Zar küp gibi yuvarlanır: her kenar üstüne devrilmede üstteki yüz
+           *  değişir. Sonuç atış anında belirlenir (adil ve rastgele); fizik
+           *  zarın o yüz üstünde durmasını sağlar.
+           * ===================================================================== */
+          class TableDie {
+            double x = 0, y = 0, z = 0, vx = 0, vy = 0, vz = 0;
+            double phi = 0; // geçerli devrilmenin açısı, 0..π/2
+            double spin = 0; // havadayken takla hızı (rad/s)
+            double heading = 0, visHeading = 0;
+            int top = 1, next = 2, target = 1;
+            bool settled = true, entered = false;
+          }
+
+          class TableSim {
+            TableSim(this.size, {required this.onHit});
+
+            Size size;
+            final HitFn onHit;
+            final List<TableDie> dice = [TableDie(), TableDie()];
+            final _rng = Random();
+            double _t = 0;
+            bool active = false;
+
+            static const rail = 18.0;
+
+            double get s => min(size.width, size.height) * 0.16; // zar boyu
+            double get _g => s * 60; // yerçekimi (px/s²)
+            double get _friction => s * 17; // yuvarlanma sürtünmesi (px/s²)
+
+            double _pan(double x) => (x / size.width * 2 - 1).clamp(-1.0, 1.0);
+
+            bool get allSettled => active && dice.every((d) => d.settled);
+
+            List<int> _adjacent(int top) => [1, 2, 3, 4, 5, 6].where((f) => f != top && f != 7 - top).toList();
+
+            int _chooseNext(TableDie d, bool slow) {
+              final adj = _adjacent(d.top);
+              if (slow && adj.contains(d.target)) return d.target;
+              return adj[_rng.nextInt(adj.length)];
+            }
+
+            /// [strength] 0.5..1.4, [startX] 0..1 ekran genişliğine göre,
+            /// [dirX] -0.6..0.6 sağa/sola sapma.
+            void launch(List<int> targets, double strength, double startX, double dirX) {
+              _t = 0;
+              active = true;
+              final w = size.width, h = size.height;
+              for (var i = 0; i < dice.length; i++) {
+                final d = dice[i];
+                d.target = targets[i];
+                d.top = 1 + _rng.nextInt(6);
+                d.next = _chooseNext(d, false);
+                d.phi = _rng.nextDouble() * 0.6;
+                d.settled = false;
+                d.entered = false;
+                d.x = w * startX.clamp(0.25, 0.75) + (i == 0 ? -1 : 1) * s * 0.75;
+                d.y = h + s * 0.6;
+                final speed = h * (1.45 + 0.9 * strength) * (0.9 + 0.2 * _rng.nextDouble());
+                final ang = dirX * 0.8 + (_rng.nextDouble() - 0.5) * 0.4;
+                d.vx = speed * sin(ang);
+                d.vy = -speed * cos(ang);
+                d.z = s * 0.9;
+                d.vz = s * (7 + 4 * strength) * (0.85 + 0.3 * _rng.nextDouble());
+                d.spin = 14 + 12 * _rng.nextDouble();
+                d.heading = atan2(d.vy, d.vx);
+                d.visHeading = d.heading;
+              }
+            }
+
+            void step(double dt) {
+              if (!active) return;
+              _t += dt;
+              const n = 3;
+              for (var i = 0; i < n; i++) {
+                _sub(dt / n);
+              }
+              if (_t > 8 && !allSettled) {
+                for (final d in dice) {
+                  d
+                    ..top = d.target
+                    ..phi = 0
+                    ..z = 0
+                    ..vx = 0
+                    ..vy = 0
+                    ..vz = 0
+                    ..settled = true;
+                }
+              }
+            }
+
+            void _sub(double dt) {
+              final w = size.width, h = size.height;
+              final half = s * 0.55;
+              final minX = rail + half, maxX = w - rail - half;
+              final minY = rail + half, maxY = h - rail - half;
+
+              for (final d in dice) {
+                if (d.settled) continue;
+                final airborne = d.z > 0 || d.vz > 0;
+                var sp = sqrt(d.vx * d.vx + d.vy * d.vy);
+
+                if (airborne) {
+                  d.vz -= _g * dt;
+                  d.z += d.vz * dt;
+                  d.x += d.vx * dt;
+                  d.y += d.vy * dt;
+                  d.phi += d.spin * dt;
+                  if (d.z <= 0) {
+                    d.z = 0;
+                    final impact = -d.vz;
+                    d.vz = impact > s * 2.5 ? impact * 0.36 : 0.0;
+                    d.vx *= 0.8;
+                    d.vy *= 0.8;
+                    sp *= 0.8;
+                    d.spin = sp / s * (pi / 2) + 6;
+                    onHit(HitKind.table, (impact / (s * 13)).clamp(0.0, 1.0), _pan(d.x));
+                  }
+                } else if (sp > 0) {
+                  final ns = max(0.0, sp - _friction * dt);
+                  d.vx *= ns / sp;
+                  d.vy *= ns / sp;
+                  d.x += d.vx * dt;
+                  d.y += d.vy * dt;
+                  d.phi += ns * dt / s * (pi / 2);
+                  sp = ns;
+                }
+                if (sp > 4) d.heading = atan2(d.vy, d.vx);
+
+                // kenar üstüne devrilme → yeni yüz
+                while (d.phi >= pi / 2) {
+                  d.phi -= pi / 2;
+                  d.top = d.next;
+                  final slow = sp < s * 3.5;
+                  d.next = _chooseNext(d, slow);
+                  if (!airborne && d.z == 0) {
+                    onHit(HitKind.tick, (sp / (s * 22)).clamp(0.06, 0.6), _pan(d.x));
+                    if (sp > s * 5) d.vz = sp * 0.05; // hızlı yuvarlanırken küçük sıçrama
+                  }
+                }
+
+                // kenarlar
+                if (d.y < maxY) d.entered = true;
+                if (d.x < minX) {
+                  d.x = minX;
+                  if (d.vx < 0) {
+                    onHit(HitKind.rail, (-d.vx / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
+                    d.vx = -d.vx * 0.5;
+                  }
+                }
+                if (d.x > maxX) {
+                  d.x = maxX;
+                  if (d.vx > 0) {
+                    onHit(HitKind.rail, (d.vx / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
+                    d.vx = -d.vx * 0.5;
+                  }
+                }
+                if (d.y < minY) {
+                  d.y = minY;
+                  if (d.vy < 0) {
+                    onHit(HitKind.rail, (-d.vy / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
+                    d.vy = -d.vy * 0.5;
+                  }
+                }
+                if (d.entered && d.y > maxY) {
+                  d.y = maxY;
+                  if (d.vy > 0) {
+                    onHit(HitKind.rail, (d.vy / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
+                    d.vy = -d.vy * 0.5;
+                  }
+                }
+
+                // yavaşladı: hedef yüz üstünde dur
+                final grounded = d.z == 0 && d.vz == 0;
+                if (grounded && sqrt(d.vx * d.vx + d.vy * d.vy) < s * 0.5) {
+                  d.vx = 0;
+                  d.vy = 0;
+                  if (d.phi > pi / 4 || d.top != d.target) {
+                    if (d.phi < 0.03 && d.top != d.target) d.next = _chooseNext(d, true);
+                    d.phi += 7 * dt; // son devrilme
+                  } else {
+                    d.phi -= d.phi * min(1.0, 14 * dt);
+                    if (d.phi < 0.004) {
+                      d.phi = 0;
+                      d.settled = true;
+                      onHit(HitKind.settle, 0.15, _pan(d.x));
+                    }
+                  }
+                }
+
+                // görünen yön yumuşakça hareket yönüne döner
+                final diff = atan2(sin(d.heading - d.visHeading), cos(d.heading - d.visHeading));
+                d.visHeading += diff * min(1.0, dt * 10);
+              }
+
+              // zar-zar
+              final a = dice[0], b = dice[1];
+              if (!(a.settled && b.settled) && (a.z - b.z).abs() < s * 0.6) {
+                final dx = b.x - a.x, dy = b.y - a.y;
+                final dist = sqrt(dx * dx + dy * dy);
+                final minD = s * 1.05;
+                if (dist < minD && dist > 0.01) {
+                  final nx = dx / dist, ny = dy / dist;
+                  final push = (minD - dist) / 2;
+                  a.x -= nx * push;
+                  a.y -= ny * push;
+                  b.x += nx * push;
+                  b.y += ny * push;
+                  final rel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+                  if (rel < 0) {
+                    final j = -(1 + 0.4) * rel / 2;
+                    a.vx -= j * nx;
+                    a.vy -= j * ny;
+                    b.vx += j * nx;
+                    b.vy += j * ny;
+                    if (a.settled && j.abs() > 1) a.settled = false;
+                    if (b.settled && j.abs() > 1) b.settled = false;
+                    onHit(HitKind.dice, (-rel / (s * 20)).clamp(0.0, 1.0), _pan((a.x + b.x) / 2));
+                  }
+                }
+              }
+            }
+          }
+          BARBUT_EOF
+          cat > lib/table_view.dart <<'BARBUT_EOF'
+          import 'dart:math';
+
+          import 'package:flutter/material.dart';
+
+          import 'palette.dart';
+          import 'physics.dart';
+
+          const _pips = {
+            1: [4],
+            2: [0, 8],
+            3: [0, 4, 8],
+            4: [0, 2, 6, 8],
+            5: [0, 2, 4, 6, 8],
+            6: [0, 2, 3, 5, 6, 8],
+          };
+
+          /// Bir zar yüzünü (0,0)-(w,w) karesine çizer.
+          void paintDieFace(Canvas canvas, double w, int value) {
+            final rect = Rect.fromLTWH(0, 0, w, w);
+            final rr = RRect.fromRectAndRadius(rect, Radius.circular(w * 0.16));
+            canvas.drawRRect(
+              rr,
+              Paint()
+                ..shader = const RadialGradient(
+                  center: Alignment(-0.4, -0.5),
+                  radius: 1.1,
+                  colors: [Palette.boneLight, Palette.bone, Palette.boneShade],
+                  stops: [0, 0.55, 1],
+                ).createShader(rect),
+            );
+            canvas.drawRRect(
+              rr.deflate(0.5),
+              Paint()
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 1
+                ..color = const Color(0x26000000),
+            );
+            final red = value == 1 || value == 4;
+            final r = w * (value == 1 ? 0.11 : 0.082);
+            const f = [0.26, 0.5, 0.74];
+            final pip = Paint()..color = red ? Palette.pipRed : Palette.pip;
+            for (final i in _pips[value] ?? const <int>[]) {
+              canvas.drawCircle(Offset(w * f[i % 3], w * f[i ~/ 3]), r, pip);
+            }
+          }
+
+          /// Masadaki zarlar: yukarıdan bakış, yuvarlanırken iki yüz görünür.
+          class DicePainter extends CustomPainter {
+            DicePainter(this.sim, Listenable repaint, {required this.opacity}) : super(repaint: repaint);
+
+            final TableSim sim;
+            final double opacity;
+
+            @override
+            void paint(Canvas canvas, Size size) {
+              if (opacity <= 0) return;
+              final list = [...sim.dice]..sort((a, b) => a.z.compareTo(b.z));
+              if (opacity < 1) {
+                canvas.saveLayer(Offset.zero & size, Paint()..color = Color.fromRGBO(0, 0, 0, opacity));
+              }
+              for (final d in list) {
+                _drawDie(canvas, d, sim.s);
+              }
+              if (opacity < 1) canvas.restore();
+            }
+
+            void _drawDie(Canvas canvas, TableDie d, double s) {
+              final lift = d.z;
+              final scale = 1 + lift / (s * 5);
+
+              // gölge: zar yükseldikçe uzaklaşır ve yumuşar
+              final shadowCenter = Offset(d.x + lift * 0.35 + s * 0.06, d.y + lift * 0.5 + s * 0.08);
+              canvas.drawRRect(
+                RRect.fromRectAndRadius(
+                  Rect.fromCenter(center: shadowCenter, width: s * (1 + lift / (s * 8)), height: s * (1 + lift / (s * 8))),
+                  Radius.circular(s * 0.2),
+                ),
+                Paint()
+                  ..color = Color.fromRGBO(0, 0, 0, (0.55 - lift / (s * 12)).clamp(0.15, 0.55))
+                  ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.06 + lift * 0.06),
+              );
+
+              canvas.save();
+              canvas.translate(d.x, d.y - lift * 0.15);
+              canvas.rotate(d.visHeading);
+              canvas.scale(scale);
+
+              final phi = d.phi.clamp(0.0, pi / 2);
+              final c = cos(phi), sn = sin(phi);
+              final wTop = s * c, wBack = s * sn;
+              final left = -(wTop + wBack) / 2;
+              if (wBack > 0.5) _face(canvas, d.next, left, wBack, s, 0.62 + 0.33 * sn);
+              if (wTop > 0.5) _face(canvas, d.top, left + wBack, wTop, s, 1 - 0.25 * sn);
+              canvas.restore();
+            }
+
+            void _face(Canvas canvas, int value, double left, double width, double s, double shade) {
+              canvas.save();
+              canvas.translate(left, -s / 2);
+              canvas.scale(width / s, 1);
+              paintDieFace(canvas, s, value);
+              if (shade < 1) {
+                canvas.drawRRect(
+                  RRect.fromRectAndRadius(Rect.fromLTWH(0, 0, s, s), Radius.circular(s * 0.16)),
+                  Paint()..color = Color.fromRGBO(20, 12, 4, (1 - shade).clamp(0.0, 0.6)),
+                );
+              }
+              canvas.restore();
+            }
+
+            @override
+            bool shouldRepaint(covariant DicePainter old) => true;
+          }
+
+          /// Kahvehane masası: koyu ceviz, damarlar, kenar pervazı.
+          class WoodTablePainter extends CustomPainter {
+            const WoodTablePainter();
+
+            @override
+            void paint(Canvas canvas, Size size) {
+              final rect = Offset.zero & size;
+              canvas.drawRect(
+                rect,
+                Paint()
+                  ..shader = const LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Color(0xFF2B180D), Color(0xFF4A2C17), Color(0xFF3A2212), Color(0xFF2A170C)],
+                    stops: [0, 0.4, 0.75, 1],
+                  ).createShader(rect),
+              );
+
+              // ahşap damarları (sabit tohum: her açılışta aynı masa)
+              final rng = Random(1923);
+              final dark = Paint()
+                ..style = PaintingStyle.stroke
+                ..color = const Color(0x22000000);
+              final light = Paint()
+                ..style = PaintingStyle.stroke
+                ..color = const Color(0x12FFD9A8);
+              for (var i = 0; i < 150; i++) {
+                final y0 = rng.nextDouble() * size.height;
+                final amp = 2 + rng.nextDouble() * 9;
+                final freq = 0.004 + rng.nextDouble() * 0.01;
+                final phase = rng.nextDouble() * pi * 2;
+                final path = Path()..moveTo(0, y0);
+                for (double x = 0; x <= size.width; x += 8) {
+                  path.lineTo(x, y0 + sin(x * freq + phase) * amp + sin(x * freq * 3.1 + phase) * amp * 0.25);
+                }
+                final p = rng.nextBool() ? dark : light;
+                p.strokeWidth = 0.6 + rng.nextDouble() * 2.2;
+                canvas.drawPath(path, p);
+              }
+              // budak
+              for (var k = 0; k < 2; k++) {
+                final c = Offset(rng.nextDouble() * size.width, rng.nextDouble() * size.height);
+                for (var r = 4.0; r < 40; r += 4) {
+                  canvas.drawOval(Rect.fromCenter(center: c, width: r * 3.2, height: r), dark..strokeWidth = 1);
+                }
+              }
+              // kenarlara doğru kararma
+              canvas.drawRect(
+                rect,
+                Paint()
+                  ..shader = const RadialGradient(
+                    radius: 0.95,
+                    colors: [Color(0x00000000), Color(0x8C000000)],
+                    stops: [0.55, 1],
+                  ).createShader(rect),
+              );
+              // pervaz
+              const rail = TableSim.rail;
+              final outer = RRect.fromRectAndRadius(rect, Radius.zero);
+              final inner = RRect.fromRectAndRadius(rect.deflate(rail), const Radius.circular(6));
+              canvas.drawDRRect(outer, inner, Paint()..color = const Color(0xFF1A0E07));
+              canvas.drawRRect(
+                inner,
+                Paint()
+                  ..style = PaintingStyle.stroke
+                  ..strokeWidth = 1.5
+                  ..color = const Color(0x40FFD9A0),
+              );
+              canvas.drawRRect(
+                inner.deflate(2),
+                Paint()
+                  ..style = PaintingStyle.stroke
+                  ..strokeWidth = 4
+                  ..color = const Color(0x33000000)
+                  ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
+              );
+            }
+
+            @override
+            bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+          }
+          BARBUT_EOF
+          cat > lib/hand_screen.dart <<'BARBUT_EOF'
+          import 'dart:async';
+
+          import 'package:flutter/material.dart';
+          import 'package:flutter/scheduler.dart';
+          import 'package:flutter/services.dart';
+          import 'package:sensors_plus/sensors_plus.dart';
+
+          import 'errors.dart';
+          import 'feel.dart';
+          import 'game.dart';
+          import 'hand_feel.dart';
+          import 'palette.dart';
+          import 'physics.dart';
+          import 'table_screen.dart';
+          import 'table_view.dart';
+
+          enum Phase { holding, flying, result }
+
+          /// Telefon avuç/fincan; ekran sadece zarların düşeceği masa.
+          class HandScreen extends StatefulWidget {
+            const HandScreen({super.key});
+
+            @override
+            State<HandScreen> createState() => _HandScreenState();
+          }
+
+          class _HandScreenState extends State<HandScreen> with SingleTickerProviderStateMixin {
+            final game = Game();
+            late final CupSim cup = CupSim(onHit: _onCupHit);
+            TableSim? table;
+            final _frame = ValueNotifier<int>(0);
+            late final Ticker _ticker;
+            Duration _last = Duration.zero;
+
+            Phase phase = Phase.holding;
+            Roll? pending, shown;
+            bool verdictOn = false;
+            bool diceOnTable = false; // önceki atışın zarları masada duruyor
+            bool sensorsOk = false;
+            int throws = 0;
+            DateTime _phaseStart = DateTime.now();
+            double _panStartX = 0.5;
+            Timer? _timer;
+            StreamSubscription<AccelerometerEvent>? _acc;
+            StreamSubscription<GyroscopeEvent>? _gyro;
+
+            @override
+            void initState() {
+              super.initState();
+              _ticker = createTicker(_onTick)..start();
+              _startSensors();
+              _guardUi(() => SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky));
+            }
+
+            @override
+            void dispose() {
+              _ticker.dispose();
+              _acc?.cancel();
+              _gyro?.cancel();
+              _timer?.cancel();
+              _frame.dispose();
+              _guardUi(() => SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+              super.dispose();
+            }
+
+            void _guardUi(Future<void> Function() fn) {
+              fn().catchError((Object e, StackTrace s) => ErrorLog.add(e, s));
+            }
+
+            void _startSensors() {
+              try {
+                _acc = accelerometerEventStream(samplingPeriod: SensorInterval.gameInterval).listen(
+                  (e) {
+                    cup.setAccel(e.x, e.y, e.z);
+                    if (!sensorsOk && mounted) setState(() => sensorsOk = true);
+                  },
+                  onError: (Object e, StackTrace s) => ErrorLog.add(e, s),
+                );
+                _gyro = gyroscopeEventStream(samplingPeriod: SensorInterval.gameInterval).listen(
+                  _onGyro,
+                  onError: (Object e, StackTrace s) => ErrorLog.add(e, s),
+                );
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+            }
+
+            /* ---------------- elde ---------------- */
+
+            void _onCupHit(HitKind kind, double s, double pan) {
+              if (phase != Phase.holding || game.over) return;
+              ImpactFeel.I.cup(kind, s, pan, palm: cup.palm);
+              if (diceOnTable && s > 0.25) {
+                // zarları masadan aldı: sıradaki atış başlıyor
+                setState(() {
+                  diceOnTable = false;
+                  verdictOn = false;
+                });
+              }
+            }
+
+            void _onGyro(GyroscopeEvent e) {
+              if (phase != Phase.holding || game.over) return;
+              if (DateTime.now().difference(_phaseStart).inMilliseconds < 700) return;
+              // fincanı devirir gibi bilek silkelemesi: telefonun yatay ekseni etrafında hızlı dönüş
+              final flick = e.x.abs();
+              if (flick > 8 && cup.hardHits >= 2) {
+                final bias = cup.biasX;
+                _throw(
+                  strength: (flick / 12).clamp(0.6, 1.4),
+                  startX: 0.5 + (bias * 0.15).clamp(-0.25, 0.25),
+                  dirX: (bias * 0.3).clamp(-0.5, 0.5),
+                );
+              }
+            }
+
+            /* ---------------- atış ---------------- */
+
+            void _throw({required double strength, required double startX, required double dirX}) {
+              final t = table;
+              if (phase != Phase.holding || game.over || t == null) return;
+              final r = game.draw();
+              pending = r;
+              t.launch([r.d1, r.d2], strength, startX, dirX);
+              ImpactFeel.I.release(strength);
+              setState(() {
+                phase = Phase.flying;
+                verdictOn = false;
+                diceOnTable = false;
+                throws++;
+              });
+            }
+
+            void _onTick(Duration elapsed) {
+              final dt = ((elapsed - _last).inMicroseconds / 1e6).clamp(0.0, 0.05);
+              _last = elapsed;
+              if (phase == Phase.holding) {
+                cup.step(dt);
+              } else if (phase == Phase.flying) {
+                final t = table;
+                if (t == null) return;
+                t.step(dt);
+                _frame.value++;
+                if (t.allSettled) _onSettled();
+              }
+            }
+
+            void _onSettled() {
+              phase = Phase.result;
+              final r = pending;
+              if (r == null) return;
+              final ends = game.endsGame(r);
+              _timer?.cancel();
+              _timer = Timer(const Duration(milliseconds: 250), () {
+                if (!mounted) return;
+                setState(() {
+                  game.apply(r);
+                  shown = r;
+                  verdictOn = true;
+                });
+                Feel.I.playResult(r.out, finalRoll: ends);
+                _timer = Timer(const Duration(milliseconds: 1500), () {
+                  if (!mounted || game.over) return;
+                  cup.reset();
+                  _phaseStart = DateTime.now();
+                  setState(() {
+                    phase = Phase.holding;
+                    diceOnTable = true;
+                  });
+                });
+              });
+            }
+
+            void _newGame() {
+              _timer?.cancel();
+              Feel.I.cancel();
+              cup.reset();
+              _phaseStart = DateTime.now();
+              setState(() {
+                game.reset();
+                shown = null;
+                pending = null;
+                verdictOn = false;
+                diceOnTable = false;
+                phase = Phase.holding;
+              });
+            }
+
+            /* ---------------- ekran ---------------- */
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                backgroundColor: Colors.black,
+                body: LayoutBuilder(builder: (context, c) {
+                  final size = Size(c.maxWidth, c.maxHeight);
+                  final t = table;
+                  if (t == null) {
+                    table = TableSim(size, onHit: (k, s, p) => ImpactFeel.I.table(k, s, p));
+                  } else if (t.size != size) {
+                    t.size = size;
+                  }
+                  final diceOpacity = phase == Phase.holding ? (diceOnTable ? 0.45 : 0.0) : 1.0;
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanStart: (d) => _panStartX = d.localPosition.dx / size.width,
+                    onPanEnd: (d) {
+                      final v = d.velocity.pixelsPerSecond;
+                      if (v.dy < -400) {
+                        _throw(
+                          strength: (v.distance / 2200).clamp(0.5, 1.4),
+                          startX: _panStartX,
+                          dirX: (v.dx / v.dy.abs()).clamp(-0.6, 0.6),
+                        );
+                      }
+                    },
+                    child: Stack(children: [
+                      const Positioned.fill(child: RepaintBoundary(child: CustomPaint(painter: WoodTablePainter()))),
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: CustomPaint(painter: DicePainter(table!, _frame, opacity: diceOpacity)),
+                        ),
+                      ),
+                      Positioned.fill(child: IgnorePointer(child: Center(child: _verdict()))),
+                      Positioned(left: 0, right: 0, top: 0, child: SafeArea(child: _hud())),
+                      Positioned(left: 0, right: 0, bottom: 0, child: SafeArea(child: _bottom())),
+                    ]),
+                  );
+                }),
+              );
+            }
+
+            Widget _hud() => Padding(
+                  padding: const EdgeInsets.fromLTRB(28, 26, 22, 0),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    Row(children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(color: const Color(0x8C000000), borderRadius: BorderRadius.circular(20)),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          _score(0),
+                          Container(width: 1, height: 16, color: const Color(0x40FFFFFF), margin: const EdgeInsets.symmetric(horizontal: 12)),
+                          _score(1),
+                        ]),
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        onPressed: _menu,
+                        icon: const Icon(Icons.tune, color: Color(0xCCE9E1CE)),
+                        tooltip: 'Ayarlar',
+                      ),
+                    ]),
+                    ValueListenableBuilder<List<String>>(
+                      valueListenable: ErrorLog.items,
+                      builder: (context, list, _) => list.isEmpty
+                          ? const SizedBox.shrink()
+                          : GestureDetector(
+                              onTap: ErrorLog.clear,
+                              child: Container(
+                                margin: const EdgeInsets.only(top: 8),
+                                padding: const EdgeInsets.all(10),
+                                color: const Color(0xCC5A1020),
+                                child: Text('Hata (fotoğrafını gönder, kapatmak için dokun):\n${list.join('\n\n')}',
+                                    style: const TextStyle(color: Colors.white, fontSize: 11)),
+                              ),
+                            ),
+                    ),
+                  ]),
+                );
+
+            Widget _score(int i) {
+              final active = !game.over && game.turn == i;
+              return Text(
+                '${i + 1}. oyuncu  ${game.akce[i]}',
+                style: TextStyle(
+                  color: active ? Palette.gold : const Color(0xB3E9E1CE),
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+                  fontSize: 15,
+                ),
+              );
+            }
+
+            Widget _verdict() {
+              final r = shown;
+              return AnimatedOpacity(
+                opacity: verdictOn && r != null ? 1 : 0,
+                duration: const Duration(milliseconds: 450),
+                child: r == null
+                    ? const SizedBox.shrink()
+                    : Builder(builder: (context) {
+                        final who = '${r.by + 1}. oyuncu';
+                        final (String title, String sub, Color color) = switch (r.out) {
+                          Outcome.win => ('Barbut!', '$who ${r.amount} akçe kazandı', const Color(0xFFB8F0D2)),
+                          Outcome.lose => ('Kaybettiren atış', '$who ${r.amount} akçe kaybetti', const Color(0xFFFFB3BF)),
+                          Outcome.pass => ('Sonuçsuz', 'Zar rakibe geçti', Palette.ink),
+                        };
+                        const glow = [Shadow(color: Color(0xE6000000), blurRadius: 18)];
+                        return Padding(
+                          padding: EdgeInsets.only(bottom: (table?.s ?? 60.0) * 3),
+                          child: Column(mainAxisSize: MainAxisSize.min, children: [
+                            Text(title,
+                                style: TextStyle(fontFamily: Palette.display, fontSize: 40, color: color, shadows: glow)),
+                            Text(sub, style: const TextStyle(color: Palette.ink, fontSize: 16, shadows: glow)),
+                          ]),
+                        );
+                      }),
+              );
+            }
+
+            Widget _bottom() {
+              if (game.over) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 40),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Text('${(game.winner ?? 0) + 1}. oyuncu masayı kazandı',
+                        style: const TextStyle(color: Palette.ink, fontSize: 18, shadows: [Shadow(color: Colors.black, blurRadius: 12)])),
+                    const SizedBox(height: 12),
+                    FilledButton(
+                      onPressed: _newGame,
+                      style: FilledButton.styleFrom(
+                          backgroundColor: Palette.gold, foregroundColor: Palette.bg, shape: const StadiumBorder()),
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                        child: Text('Yeniden oyna', style: TextStyle(fontFamily: Palette.display, fontSize: 20)),
+                      ),
+                    ),
+                  ]),
+                );
+              }
+              final turn = 'Sıra ${game.turn + 1}. oyuncuda';
+              final vessel = cup.palm ? 'zarlar avucunda' : 'zarlar fincanda';
+              final String text;
+              if (phase != Phase.holding) {
+                text = '';
+              } else if (!sensorsOk) {
+                text = '$turn.\nAtmak için ekranda aşağıdan yukarı kaydır.';
+              } else if (throws < 2) {
+                text = '$turn, $vessel.\nTelefonu salla, sonra bileğini öne doğru silkeleyerek fırlat.\nYa da ekranda yukarı kaydır.';
+              } else {
+                text = '$turn · $vessel';
+              }
+              return IgnorePointer(
+                child: AnimatedOpacity(
+                  opacity: text.isEmpty ? 0 : 0.85,
+                  duration: const Duration(milliseconds: 300),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(32, 0, 32, 40),
+                    child: Text(
+                      text,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: Palette.ink, fontSize: 15, height: 1.45, shadows: [Shadow(color: Colors.black, blurRadius: 10)]),
+                    ),
+                  ),
+                ),
+              );
+            }
+
+            void _menu() {
+              showModalBottomSheet<void>(
+                context: context,
+                backgroundColor: Palette.surface,
+                builder: (ctx) => StatefulBuilder(
+                  builder: (ctx, setSheet) => SafeArea(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      SwitchListTile(
+                        title: const Text('Ses'),
+                        value: Feel.I.soundOn,
+                        onChanged: (v) => setSheet(() => Feel.I.soundOn = v),
+                      ),
+                      SwitchListTile(
+                        title: const Text('Titreşim'),
+                        value: Feel.I.hapticsOn,
+                        onChanged: (v) => setSheet(() => Feel.I.hapticsOn = v),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                        child: Row(children: [
+                          const Expanded(child: Text('Zarlar nerede')),
+                          ChoiceChip(
+                            label: const Text('Fincan'),
+                            selected: !cup.palm,
+                            onSelected: (_) {
+                              setSheet(() => cup.palm = false);
+                              setState(() {});
+                            },
+                          ),
+                          const SizedBox(width: 8),
+                          ChoiceChip(
+                            label: const Text('Avuç'),
+                            selected: cup.palm,
+                            onSelected: (_) {
+                              setSheet(() => cup.palm = true);
+                              setState(() {});
+                            },
+                          ),
+                        ]),
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.refresh),
+                        title: const Text('Yeni oyun'),
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _newGame();
+                        },
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.grid_view),
+                        title: const Text('Klasik masa'),
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const TableScreen()));
+                        },
+                      ),
+                    ]),
+                  ),
+                ),
+              );
             }
           }
           BARBUT_EOF
@@ -358,6 +1593,8 @@ jobs:
           import 'dart:math';
 
           import 'package:sensors_plus/sensors_plus.dart';
+
+          import 'errors.dart';
 
           /// Telefonu kupa gibi sallamayı algılar. Sallarken [onRattle],
           /// sallama bitince (kısa bir duraksama) [onRelease] çağrılır: zar atılır.
@@ -374,8 +1611,12 @@ jobs:
             DateTime _start = DateTime(0), _last = DateTime(0), _lastTick = DateTime(0);
 
             void start() {
-              _sub ??= userAccelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)
-                  .listen(_onEvent, onError: (Object _) {});
+              try {
+                _sub ??= userAccelerometerEventStream(samplingPeriod: SensorInterval.gameInterval)
+                    .listen(_onEvent, onError: (Object e, StackTrace s) => ErrorLog.add(e, s));
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
             }
 
             void stop() {
@@ -656,6 +1897,7 @@ jobs:
           import 'package:flutter/material.dart';
 
           import 'die.dart';
+          import 'errors.dart';
           import 'feel.dart';
           import 'game.dart';
           import 'palette.dart';
@@ -747,6 +1989,7 @@ jobs:
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
                     children: [
                       _topBar(),
+                      _errors(),
                       const SizedBox(height: 12),
                       Row(children: [
                         Expanded(child: _plaque(0)),
@@ -768,6 +2011,33 @@ jobs:
                 ),
               );
             }
+
+            Widget _errors() => ValueListenableBuilder<List<String>>(
+                  valueListenable: ErrorLog.items,
+                  builder: (context, list, _) {
+                    if (list.isEmpty) return const SizedBox.shrink();
+                    return Container(
+                      margin: const EdgeInsets.only(top: 8),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0x33EE7B8C),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Palette.lose),
+                      ),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [
+                          const Expanded(
+                            child: Text('Bir hata oluştu. Bu kutunun fotoğrafını gönder:',
+                                style: TextStyle(color: Palette.ink, fontWeight: FontWeight.w700)),
+                          ),
+                          TextButton(onPressed: ErrorLog.clear, child: const Text('Kapat')),
+                        ]),
+                        SelectableText(list.join('\n\n'),
+                            style: const TextStyle(color: Palette.ink, fontSize: 12, fontFamily: 'monospace')),
+                      ]),
+                    );
+                  },
+                );
 
             Widget _title(String t) => Padding(
                   padding: const EdgeInsets.only(bottom: 10),
@@ -1237,6 +2507,82 @@ jobs:
           add(x, gong(5.0, 73.4, 0.35), 0.8)
           add(x, bell(4.5, HICAZ[0] * 4, 0.1), 0.85)
           save("final.wav", verb(x, 0.75))
+
+
+          # =====================================================================
+          #  "Avuç / fincan" modu için kısa çarpma sesleri (hızına göre çalınır)
+          # =====================================================================
+          IR_ROOM = impulse_response(0.7, 3.8)
+
+
+          def room(dry, wet=0.18):
+              w = fftconvolve(dry, IR_ROOM)[: len(dry)]
+              return dry + w * wet
+
+
+          # porselen fincana çarpan kemik zar: tık + kısa porselen çınlaması
+          for i in range(1, 5):
+              x = buf(0.4)
+              add(x, bone_click(0.9, pitch=1.0 + rng.uniform(-0.08, 0.08)), 0)
+              f0 = rng.uniform(2100, 2700)
+              for m, a, c in [(1, 0.10, 14), (1.58, 0.07, 18), (2.31, 0.05, 22)]:
+                  add(x, sine(0.35, f0 * m, att=0.001, curve=c), 0, a)
+              add(x, sine(0.08, rng.uniform(380, 460), curve=12), 0, 0.12)
+              save(f"cup_hit_{i}.wav", room(x, 0.25), peak=0.85)
+
+          # avuç içi: boğuk, yumuşak
+          for i in range(1, 5):
+              x = buf(0.25)
+              n = int(SR * 0.06)
+              add(x, lowpass(rng.uniform(-1, 1, n), rng.uniform(700, 1100)) * env(n, 0.002, 9) * 2.5, 0, 0.5)
+              add(x, sine(0.1, rng.uniform(100, 130), 75, curve=9), 0, 0.5)
+              add(x, lowpass(bone_click(0.6), 1600), 0.004)
+              save(f"palm_{i}.wav", x, peak=0.8)
+
+          # ahşap masaya düşüş: gövde "tok" + ahşap rezonansı + tık
+          for i in range(1, 5):
+              x = buf(0.45)
+              add(x, sine(0.18, rng.uniform(170, 230), 120, curve=8), 0, 0.55)
+              n = int(SR * 0.12)
+              add(x, band(rng.uniform(-1, 1, n), 480, 1150) * env(n, 0.001, 10) * 3, 0, 0.35)
+              add(x, bone_click(0.8, pitch=0.9 + rng.uniform(-0.05, 0.05)), 0.002)
+              save(f"table_hit_{i}.wav", room(x, 0.22), peak=0.9)
+
+          # yuvarlanırken kenar üstüne her devrilme: hafif tık-tok
+          for i in range(1, 4):
+              x = buf(0.2)
+              add(x, sine(0.08, rng.uniform(230, 300), curve=10), 0, 0.35)
+              add(x, bone_click(0.55, pitch=1.05 + rng.uniform(-0.05, 0.05)), 0)
+              save(f"table_tick_{i}.wav", room(x, 0.15), peak=0.7)
+
+          # masa kenarına (pervaz) çarpma: daha kalın, tahta tokmak
+          for i in range(1, 3):
+              x = buf(0.5)
+              add(x, sine(0.25, rng.uniform(105, 125), 85, curve=7), 0, 0.6)
+              n = int(SR * 0.15)
+              add(x, band(rng.uniform(-1, 1, n), 260, 720) * env(n, 0.001, 8) * 3, 0, 0.4)
+              add(x, lowpass(bone_click(0.8), 2600), 0)
+              save(f"rail_{i}.wav", room(x, 0.25), peak=0.9)
+
+          # iki zarın birbirine çarpması: keskin kemik "çat"
+          for i in range(1, 3):
+              x = buf(0.25)
+              for k in range(2):
+                  add(x, noise_burst(0.025, rng.uniform(3400, 4600), q=4, curve=12), k * 0.004, 0.4)
+              add(x, sine(0.05, rng.uniform(1800, 2200), curve=10), 0, 0.15)
+              save(f"clack_{i}.wav", room(x, 0.15), peak=0.85)
+
+          # zarları bırakış: hava savrulması
+          x = buf(0.6)
+          n = int(SR * 0.4)
+          wh = rng.uniform(-1, 1, n)
+          seg = n // 10
+          sw = np.zeros(n)
+          for s_ in range(10):
+              f = 300 * (2600 / 300) ** (s_ / 9)
+              sw[s_ * seg:(s_ + 1) * seg] = band(wh, f * 0.7, f * 1.3)[s_ * seg:(s_ + 1) * seg]
+          add(x, sw * env(n, 0.15, 5) * 2, 0, 0.35)
+          save("release.wav", room(x, 0.3), peak=0.7)
           BARBUT_EOF
           ls -R lib test
 
@@ -1245,18 +2591,27 @@ jobs:
         run: |
           pip install numpy scipy
           python tool/make_sounds.py
+          ls -la assets/sounds
 
       - name: Titreşim izni ve uygulama adı
         working-directory: barbut_app
         run: |
           M=android/app/src/main/AndroidManifest.xml
-          grep -q 'android.permission.VIBRATE' "$M" || \
-            sed -i 's#<manifest xmlns:android="http://schemas.android.com/apk/res/android">#&\n    <uses-permission android:name="android.permission.VIBRATE"/>#' "$M"
+          if ! grep -q 'android.permission.VIBRATE' "$M"; then
+            sed -i '0,/<application/s##<uses-permission android:name="android.permission.VIBRATE"/>\n    <application#' "$M"
+          fi
           sed -i 's#android:label="barbut"#android:label="Barbut"#' "$M"
+          cat "$M"
+          grep -q 'android.permission.VIBRATE' "$M" || { echo "VIBRATE izni eklenemedi"; exit 1; }
 
       - name: Paketleri indir
         working-directory: barbut_app
         run: flutter pub get
+
+      - name: Kod kontrolü (yalnızca bilgi)
+        working-directory: barbut_app
+        continue-on-error: true
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings lib
 
       - name: Kural testleri
         working-directory: barbut_app
