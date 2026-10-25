@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 4: SoLoud ses motoru): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 5: dökerek atış): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -1183,7 +1183,7 @@ jobs:
           import 'table_screen.dart';
           import 'table_view.dart';
 
-          enum Phase { holding, flying, result }
+          enum Phase { holding, released, flying, result }
 
           /// Telefon avuç/fincan; ekran sadece zarların düşeceği masa.
           class HandScreen extends StatefulWidget {
@@ -1209,6 +1209,11 @@ jobs:
             int throws = 0;
             DateTime _phaseStart = DateTime.now();
             double _panStartX = 0.5;
+            // yerçekimi yönü (yumuşatılmış ivmeölçer): telefon nereye bakıyor?
+            double _gx = 0, _gy = 0, _gz = 9.81;
+            double _downMs = 0;
+            DateTime _releasedAt = DateTime.now();
+            double _releaseStrength = 1;
             Timer? _timer;
             StreamSubscription<AccelerometerEvent>? _acc;
             StreamSubscription<GyroscopeEvent>? _gyro;
@@ -1241,6 +1246,9 @@ jobs:
                 _acc = accelerometerEventStream(samplingPeriod: SensorInterval.gameInterval).listen(
                   (e) {
                     cup.setAccel(e.x, e.y, e.z);
+                    _gx += (e.x - _gx) * 0.2;
+                    _gy += (e.y - _gy) * 0.2;
+                    _gz += (e.z - _gz) * 0.2;
                     if (!sensorsOk && mounted) setState(() => sensorsOk = true);
                   },
                   onError: (Object e, StackTrace s) => ErrorLog.add(e, s),
@@ -1259,7 +1267,7 @@ jobs:
             void _onCupHit(HitKind kind, double s, double pan) {
               if (phase != Phase.holding || game.over) return;
               ImpactFeel.I.cup(kind, s, pan, palm: cup.palm);
-              if (diceOnTable && s > 0.25) {
+              if (diceOnTable && s > 0.2) {
                 // zarları masadan aldı: sıradaki atış başlıyor
                 setState(() {
                   diceOnTable = false;
@@ -1273,7 +1281,7 @@ jobs:
               if (DateTime.now().difference(_phaseStart).inMilliseconds < 700) return;
               // fincanı devirir gibi bilek silkelemesi: telefonun yatay ekseni etrafında hızlı dönüş
               final flick = e.x.abs();
-              if (flick > 8 && cup.hardHits >= 2) {
+              if (flick > 7 && cup.hardHits >= 1) {
                 final bias = cup.biasX;
                 _throw(
                   strength: (flick / 12).clamp(0.6, 1.4),
@@ -1285,13 +1293,29 @@ jobs:
 
             /* ---------------- atış ---------------- */
 
+            double get _shakeStrength => (0.7 + cup.hardHits * 0.04).clamp(0.7, 1.3);
+
+            /// Telefonun ucu masaya doğru çevrildi: zarlar fincandan döküldü.
+            /// Masaya düşüşleri, ekran tekrar sana dönünce (ya da en geç 1,2 sn sonra) başlar.
+            void _release() {
+              if (phase != Phase.holding || game.over || table == null) return;
+              _releaseStrength = _shakeStrength;
+              _releasedAt = DateTime.now();
+              ImpactFeel.I.release(_releaseStrength);
+              setState(() {
+                phase = Phase.released;
+                diceOnTable = false;
+                verdictOn = false;
+              });
+            }
+
             void _throw({required double strength, required double startX, required double dirX}) {
               final t = table;
-              if (phase != Phase.holding || game.over || t == null) return;
+              if ((phase != Phase.holding && phase != Phase.released) || game.over || t == null) return;
               final r = game.draw();
               pending = r;
               t.launch([r.d1, r.d2], strength, startX, dirX);
-              ImpactFeel.I.release(strength);
+              if (phase == Phase.holding) ImpactFeel.I.release(strength);
               setState(() {
                 phase = Phase.flying;
                 verdictOn = false;
@@ -1305,6 +1329,22 @@ jobs:
               _last = elapsed;
               if (phase == Phase.holding) {
                 cup.step(dt);
+                // dökme hareketi: telefonun üst ucu aşağı bakıyor ya da ekran yere dönük
+                final pointingDown = _gy < -3.5 || _gz < -4.0;
+                _downMs = pointingDown ? _downMs + dt * 1000 : 0;
+                if (_downMs > 60 && DateTime.now().difference(_phaseStart).inMilliseconds > 500) {
+                  _downMs = 0;
+                  _release();
+                }
+              } else if (phase == Phase.released) {
+                final lookingAgain = _gy > 1.5 && _gz > -1;
+                if (lookingAgain || DateTime.now().difference(_releasedAt).inMilliseconds > 1200) {
+                  _throw(
+                    strength: _releaseStrength,
+                    startX: 0.5 + (_gx * -0.03).clamp(-0.2, 0.2),
+                    dirX: (_gx * -0.05).clamp(-0.4, 0.4),
+                  );
+                }
               } else if (phase == Phase.flying) {
                 final t = table;
                 if (t == null) return;
@@ -1369,7 +1409,7 @@ jobs:
                   } else if (t.size != size) {
                     t.size = size;
                   }
-                  final diceOpacity = phase == Phase.holding ? (diceOnTable ? 0.45 : 0.0) : 1.0;
+                  final diceOpacity = (phase == Phase.holding || phase == Phase.released) ? (diceOnTable ? 0.45 : 0.0) : 1.0;
                   return GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onPanStart: (d) => _panStartX = d.localPosition.dx / size.width,
@@ -1504,7 +1544,7 @@ jobs:
               } else if (!sensorsOk) {
                 text = '$turn.\nAtmak için ekranda aşağıdan yukarı kaydır.';
               } else if (throws < 2) {
-                text = '$turn, $vessel.\nTelefonu salla, sonra bileğini öne doğru silkeleyerek fırlat.\nYa da ekranda yukarı kaydır.';
+                text = '$turn, $vessel.\nTelefonu salla, sonra ucunu masaya doğru çevir: zarları döker gibi.\nYa da ekranda aşağıdan yukarı kaydır.';
               } else {
                 text = '$turn · $vessel';
               }
