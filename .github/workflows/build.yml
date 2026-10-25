@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 15: yeni kural — yüksek atan kazanır): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 16: eğlenceli kazanma/kaybetme sesleri): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -311,11 +311,12 @@ jobs:
               'release', 'table_hit_1', 'table_hit_2', 'table_hit_3', 'table_hit_4', 'table_hit_5',
               'table_hit_6', 'table_hit_7', 'table_hit_8', 'table_tick_1', 'table_tick_2', 'table_tick_3',
               'table_tick_4', 'table_tick_5', 'table_tick_6', 'throw_1', 'throw_2', 'throw_3',
-              'tick_1', 'tick_2', 'tick_3', 'tick_4', 'win',
+              'tick_1', 'tick_2', 'tick_3', 'tick_4', 'win', 'win_fun',
+              'lose_fun',
             ];
 
             /// Müzikler üretilmiş WAV, zar sesleri gerçek kayıtlardan kesilmiş OGG.
-            static const _wav = {'final', 'lose', 'pass', 'win'};
+            static const _wav = {'final', 'lose', 'lose_fun', 'pass', 'win', 'win_fun'};
 
             final Map<String, AudioSource> _sources = {};
             bool get ready => _sources.isNotEmpty;
@@ -377,6 +378,9 @@ jobs:
 
             bool soundOn = true;
             bool hapticsOn = true;
+
+            /// Sonuç sesleri: true → eğlenceli (borazan + akçe, trombon), false → klasik.
+            bool funSounds = true;
 
             final _rng = Random();
             final List<Timer> _timers = [];
@@ -481,8 +485,8 @@ jobs:
             void _scheduleResult(int tr, Outcome out, bool finalRoll) {
               _at(tr, () {
                 _play(switch (out) {
-                  Outcome.win => 'win',
-                  Outcome.lose => 'lose',
+                  Outcome.win => funSounds ? 'win_fun' : 'win',
+                  Outcome.lose => funSounds ? 'lose_fun' : 'lose',
                   Outcome.first || Outcome.tie => 'pass',
                 });
               });
@@ -2243,6 +2247,23 @@ jobs:
                         value: Feel.I.soundOn,
                         onChanged: (v) => setSheet(() => Feel.I.soundOn = v),
                       ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                        child: Row(children: [
+                          const Expanded(child: Text('Sonuç sesleri')),
+                          ChoiceChip(
+                            label: const Text('Eğlenceli'),
+                            selected: Feel.I.funSounds,
+                            onSelected: (_) => setSheet(() => Feel.I.funSounds = true),
+                          ),
+                          const SizedBox(width: 8),
+                          ChoiceChip(
+                            label: const Text('Klasik'),
+                            selected: !Feel.I.funSounds,
+                            onSelected: (_) => setSheet(() => Feel.I.funSounds = false),
+                          ),
+                        ]),
+                      ),
                       SwitchListTile(
                         title: const Text('Titreşim'),
                         value: Feel.I.hapticsOn,
@@ -3299,6 +3320,106 @@ jobs:
 
           # Zar çarpma sesleri burada üretilmez: gerçek zar kayıtlarından (Kenney Casino Audio,
           # CC0 / kamu malı) kesilmiş tek tek çarpmalar derleme sırasında assets/sounds içine açılır.
+
+
+          # =====================================================================
+          #  EĞLENCELİ SONUÇ SESLERİ (win_fun, lose_fun)
+          #  Klasik win/lose yukarıda aynen duruyor; ayarlardan seçilebilir.
+          #  Bakır nefesli tınısı toplamalı sentezle: her harmoniğin gücü zamanla
+          #  değişir, böylece borazanın parlaması ve trombon sürdinasının "va-va"sı
+          #  filtre gerekmeden elde edilir.
+          # =====================================================================
+
+          def horn(dur, freq, bright, amp, nh=28, breath=0.0):
+              """freq, bright (etkin harmonik sayısı), amp: her örnek için dizi ya da sabit."""
+              n = int(SR * dur)
+              t = np.arange(n) / SR
+              f = np.broadcast_to(np.asarray(freq, dtype=float), (n,)) if np.ndim(freq) == 0 else freq[:n]
+              b = np.broadcast_to(np.asarray(bright, dtype=float), (n,)) if np.ndim(bright) == 0 else bright[:n]
+              a = np.broadcast_to(np.asarray(amp, dtype=float), (n,)) if np.ndim(amp) == 0 else amp[:n]
+              ph = 2 * np.pi * np.cumsum(f) / SR
+              x = np.zeros(n)
+              for k in range(1, nh + 1):
+                  w = np.exp(-(k - 1) / np.maximum(b, 0.3)) / k
+                  w = np.where(k * f < SR / 2 - 500, w, 0)
+                  x += w * np.sin(k * ph)
+              if breath:
+                  x += band(rng.uniform(-1, 1, n), 900, 3000) * breath * (b / 8)
+              return x * a
+
+
+          def adsr(n, a, d, s, r):
+              e = np.full(n, s)
+              ai, di, ri = int(SR * a), int(SR * d), int(SR * r)
+              e[:ai] = np.linspace(0, 1, ai)
+              e[ai:ai + di] = np.linspace(1, s, di)
+              e[n - ri:] *= np.linspace(1, 0, ri)
+              return e
+
+
+          def coin(gain=1.0):
+              """Akçe şıngırtısı: ince metal paranın uyumsuz kısmi tınıları, kısa ve parlak."""
+              x = buf(0.35)
+              f0 = rng.uniform(2300, 3500)
+              for m, a, tau in [(1, 1, 0.12), (1.47, 0.6, 0.09), (2.09, 0.45, 0.07), (2.56, 0.3, 0.05), (3.7, 0.2, 0.03)]:
+                  n = len(x)
+                  tt = np.arange(n) / SR
+                  x += a * np.sin(2 * np.pi * f0 * m * rng.uniform(0.99, 1.01) * tt) * np.exp(-tt / (tau * rng.uniform(0.7, 1.3)))
+              n = int(SR * 0.004)
+              x[:n] += highpass(rng.uniform(-1, 1, n), 4000) * 0.8
+              return x * gain * 0.25
+
+
+          def room_s(dry, wet=0.15):
+              ir = impulse_response(0.5, 4.0)
+              return dry + fftconvolve(dry, ir)[: len(dry)] * wet
+
+
+          # --- kazanma: neşeli borazan arpeji + yağmur gibi dökülen akçeler ---
+          x = buf(2.6)
+          C5, E5, G5, C6, E6 = 523.25, 659.26, 783.99, 1046.5, 1318.5
+          for i, f in enumerate([C5, E5, G5]):
+              n = int(SR * 0.11)
+              add(x, horn(0.11, f, 2 + 6 * np.linspace(1, 0.6, n), adsr(n, 0.008, 0.05, 0.7, 0.03)), i * 0.09, 0.32)
+          # son nota: parlayan, titreşimli uzun do + üstünde mi
+          n = int(SR * 1.0)
+          t = np.arange(n) / SR
+          vib = 1 + 0.008 * np.sin(2 * np.pi * 5.6 * t) * np.clip(t / 0.3, 0, 1)
+          swell = 3 + 6 * np.clip(t / 0.12, 0, 1) - 2 * np.clip((t - 0.5) / 0.5, 0, 1)
+          add(x, horn(1.0, C6 * vib, swell, adsr(n, 0.01, 0.15, 0.8, 0.35), breath=0.02), 0.27, 0.34)
+          add(x, horn(1.0, G5 * vib, swell * 0.8, adsr(n, 0.02, 0.15, 0.7, 0.35)), 0.29, 0.2)
+          add(x, horn(1.0, E6 * vib, swell * 0.6, adsr(n, 0.03, 0.2, 0.5, 0.4)), 0.31, 0.12)
+          # akçeler: önce sık, sonra seyrek; kimi tek, kimi sekerek iki kez
+          times = np.sort(0.32 + rng.beta(1.4, 3.0, 22) * 1.9)
+          for at in times:
+              g = rng.uniform(0.5, 1.0)
+              add(x, coin(g), at)
+              if rng.random() < 0.45:
+                  add(x, coin(g * 0.45), at + rng.uniform(0.05, 0.11))
+          # en sonda tek bir parlak "çın"
+          add(x, bell(1.2, C6 * 2, 0.06), 1.15)
+          x = room_s(x, 0.18)
+          save("win_fun.wav", x / np.max(np.abs(x)) * 0.8)  # önce ölçekle: sıkıştırma bozmasın
+
+          # --- kaybetme: sürdinalı trombon "va-va-va-vaaa" ---
+          x = buf(3.0)
+          notes = [(233.08, 0.0, 0.40), (220.0, 0.44, 0.40), (207.65, 0.88, 0.40), (196.0, 1.32, 1.45)]
+          for k, (f, at, dur) in enumerate(notes):
+              n = int(SR * dur)
+              t = np.arange(n) / SR
+              if k < 3:
+                  wah = 1.5 + 6.5 * np.sin(np.pi * np.clip(t / dur, 0, 1)) ** 1.5  # sürdina açılıp kapanır
+                  freq = f * (1 - 0.012 * np.exp(-t / 0.04))  # nota başında hafif aşağıdan gelme
+                  amp = adsr(n, 0.03, 0.08, 0.85, 0.08)
+              else:
+                  # son nota: titreyen "vaaaa", sonunda yarım ton aşağı kayar
+                  wah = 2 + 5 * (0.5 + 0.5 * np.sin(2 * np.pi * 3.6 * t)) * np.clip(t / 0.15, 0, 1)
+                  slide = 1 - 0.06 * np.clip((t - 0.95) / 0.5, 0, 1) ** 2
+                  freq = f * slide * (1 + 0.02 * np.sin(2 * np.pi * 5.8 * t) * np.clip((t - 0.2) / 0.4, 0, 1))
+                  amp = adsr(n, 0.03, 0.1, 0.9, 0.45)
+              add(x, horn(dur, freq, wah, amp, nh=22, breath=0.03), at, 0.5)
+          x = room_s(x, 0.15)
+          save("lose_fun.wav", x / np.max(np.abs(x)) * 0.8, peak=0.72)
           BARBUT_EOF
           ls -R lib test
 
