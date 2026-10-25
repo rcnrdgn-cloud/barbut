@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 9: hafif eğimle anında dökülen zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 10: yatayı aşağı geçince dökülen zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -1352,12 +1352,15 @@ jobs:
           }
 
           class _HandScreenState extends State<HandScreen> with SingleTickerProviderStateMixin {
-            /// Zarların dökülmesi için telefonun ucunun yataydan ne kadar aşağı eğilmesi gerekir (derece).
-            /// Gerçek fincan gibi: az bir eğim yeter.
-            static const pourAngle = 10.0;
+            /// Telefonun ucu yatayı aşağı doğru geçtiği an zarlar dökülür (derece).
+            /// 1,5°: yatayın hemen altı; titreşim payı kadar küçük bir sınır.
+            static const pourAngle = 1.5;
 
-            /// Yeni atışa hazır olmak için telefonun yeniden ne kadar düzleşmesi gerekir (derece).
-            static const rearmAngle = 4.0;
+            /// Yeni atışa hazır olmak için telefon yeniden yataya (ya da yukarı) gelmeli (derece).
+            static const rearmAngle = 0.0;
+
+            /// Sallama bittikten sonra bu kadar ms sakin kalınca dökme algılanır.
+            static const shakeQuietMs = 120;
 
             /// Bir atışta zarın masadan düşme ihtimali (0.10 = her 10 atıştan biri).
             static const dropChance = 0.10;
@@ -1391,7 +1394,6 @@ jobs:
             DateTime? _lastGyro;
             double _tiltRate = 0; // ucun aşağı devrilme hızı (rad/s)
             DateTime _lastJolt = DateTime(0); // en son sert sarsıntı anı
-            int _tiltSamples = 0;
             bool _armed = true; // telefon düzleşti, yeni dökmeye hazır
             DateTime _releasedAt = DateTime.now();
             double _releaseStrength = 1;
@@ -1429,7 +1431,7 @@ jobs:
                     cup.setAccel(e.x, e.y, e.z);
                     final mag = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
                     final dev = (mag - 9.81).abs();
-                    if (dev > 7) _lastJolt = DateTime.now(); // sallanıyor
+                    if (dev > 6) _lastJolt = DateTime.now(); // sallanıyor
                     if (!_gyroOk) {
                       // jiroskop yoksa: ivmeölçerden hızlıca
                       _gx += (e.x - _gx) * 0.3;
@@ -1486,19 +1488,16 @@ jobs:
               return _gz < 0 ? max(down, 90.0) : down;
             }
 
-            /// Dökme: telefonun ucu az da olsa aşağı eğildi mi? Sallamak tek başına zar atmaz.
+            /// Dökme: yatay ya da yukarı doğru sallama biter, telefonun ucu yatayı aşağı
+            /// doğru geçer geçmez zarlar düşer. Sallarken yatayın altına inip çıkmak sayılmaz;
+            /// sallama biter bitmez uç hâlâ aşağıdaysa o an dökülür.
             void _checkPour() {
               if (phase != Phase.holding || game.over) return;
               final tilt = _tilt;
-              if (tilt < rearmAngle) _armed = true;
-              final shaking = DateTime.now().difference(_lastJolt).inMilliseconds < 100;
-              if (_armed && tilt > pourAngle && !shaking) {
-                _tiltSamples++;
-              } else {
-                _tiltSamples = 0;
-              }
-              if (_tiltSamples >= 2 && DateTime.now().difference(_phaseStart).inMilliseconds > 300) {
-                _tiltSamples = 0;
+              if (tilt <= rearmAngle) _armed = true;
+              final shaking = DateTime.now().difference(_lastJolt).inMilliseconds < shakeQuietMs;
+              if (_armed && tilt > pourAngle && !shaking &&
+                  DateTime.now().difference(_phaseStart).inMilliseconds > 300) {
                 _armed = false;
                 _release();
               }
@@ -1846,8 +1845,8 @@ jobs:
               } else if (!sensorsOk) {
                 hint = 'Atmak için ekranda aşağıdan yukarı kaydır.';
               } else if (throws < 2) {
-                hint = '$vessel. Telefonu düz tut, istediğin kadar salla; atmak için '
-                    'ucunu fincan gibi hafifçe masaya doğru eğ.';
+                hint = '$vessel. Telefonu düz ya da ucu hafif yukarıda tutup istediğin kadar salla; '
+                    'ucu yatayı aşağı doğru geçtiği an zarlar dökülür.';
               } else {
                 hint = vessel;
               }
