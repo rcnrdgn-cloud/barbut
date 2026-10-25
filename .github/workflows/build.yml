@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 5: dökerek atış): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 6: düşen zar, son atış şeridi, sıra göstergesi): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -568,6 +568,9 @@ jobs:
                   _haptic(s * 0.8, baseMs: 6);
                 case HitKind.settle:
                   _haptic(0.15, baseMs: 6);
+                case HitKind.fall: // masanın altında, yerde: uzaktan gelen boğuk ses
+                  _sound(_pick('table_hit', 4), 0.12 + 0.2 * s, pan);
+                  _haptic(0.12, baseMs: 6);
                 case HitKind.wall:
                 case HitKind.floor:
                   break;
@@ -584,7 +587,7 @@ jobs:
           import 'dart:math';
           import 'dart:ui' show Size;
 
-          enum HitKind { wall, floor, dice, table, tick, rail, settle }
+          enum HitKind { wall, floor, dice, table, tick, rail, settle, fall }
 
           /// [strength] 0..1 arası: çarpmanın ne kadar sert olduğu. [pan]: -1 sol, 1 sağ.
           typedef HitFn = void Function(HitKind kind, double strength, double pan);
@@ -757,6 +760,10 @@ jobs:
             double heading = 0, visHeading = 0;
             int top = 1, next = 2, target = 1;
             bool settled = true, entered = false;
+            bool falls = false; // bu atışta masadan düşecek
+            bool over = false; // kenarı aştı, yere düşüyor
+            bool fallen = false; // masadan düştü, artık görünmez
+            double side = 1; // düşeceği kenar: -1 sol, 1 sağ
           }
 
           class TableSim {
@@ -770,6 +777,12 @@ jobs:
             bool active = false;
 
             static const rail = 18.0;
+
+            /// Üstteki skor ve alttaki yazıların kapladığı şerit (piksel).
+            /// Zarlar bu şeritlere girmez: üst kenar burada başlar.
+            double topInset = 0, bottomInset = 0;
+
+            int get fallenCount => dice.where((d) => d.fallen).length;
 
             double get s => min(size.width, size.height) * 0.16; // zar boyu
             double get _g => s * 60; // yerçekimi (px/s²)
@@ -788,8 +801,9 @@ jobs:
             }
 
             /// [strength] 0.5..1.4, [startX] 0..1 ekran genişliğine göre,
-            /// [dirX] -0.6..0.6 sağa/sola sapma.
-            void launch(List<int> targets, double strength, double startX, double dirX) {
+            /// [dirX] -0.6..0.6 sağa/sola sapma. [falls]: hangi zar masadan düşecek.
+            void launch(List<int> targets, double strength, double startX, double dirX,
+                {List<bool> falls = const [false, false]}) {
               _t = 0;
               active = true;
               final w = size.width, h = size.height;
@@ -801,10 +815,17 @@ jobs:
                 d.phi = _rng.nextDouble() * 0.6;
                 d.settled = false;
                 d.entered = false;
+                d.falls = falls[i];
+                d.over = false;
+                d.fallen = false;
+                d.side = i == 0 ? -1.0 : 1.0;
                 d.x = w * startX.clamp(0.25, 0.75) + (i == 0 ? -1 : 1) * s * 0.75;
                 d.y = h + s * 0.6;
-                final speed = h * (1.45 + 0.9 * strength) * (0.9 + 0.2 * _rng.nextDouble());
-                final ang = dirX * 0.8 + (_rng.nextDouble() - 0.5) * 0.4;
+                // Hız, zarlar masanın ortasında duracak şekilde ayarlı (eskisi üst kenara yapıştırıyordu).
+                final speed = h * (0.5 + 0.35 * strength) * (0.9 + 0.2 * _rng.nextDouble());
+                final ang = d.falls
+                    ? d.side * (0.3 + 0.15 * _rng.nextDouble()) // yana doğru, kenardan aşacak
+                    : dirX * 0.8 + (_rng.nextDouble() - 0.5) * 0.4;
                 d.vx = speed * sin(ang);
                 d.vy = -speed * cos(ang);
                 d.z = s * 0.9;
@@ -824,6 +845,12 @@ jobs:
               }
               if (_t > 8 && !allSettled) {
                 for (final d in dice) {
+                  if (d.falls) {
+                    d
+                      ..fallen = true
+                      ..settled = true;
+                    continue;
+                  }
                   d
                     ..top = d.target
                     ..phi = 0
@@ -840,10 +867,31 @@ jobs:
               final w = size.width, h = size.height;
               final half = s * 0.55;
               final minX = rail + half, maxX = w - rail - half;
-              final minY = rail + half, maxY = h - rail - half;
+              final minY = max(rail, topInset) + half, maxY = h - max(rail, bottomInset) - half;
 
               for (final d in dice) {
                 if (d.settled) continue;
+
+                // kenarı aştı: masanın altına, yere düşüyor (küçülüp kaybolur)
+                if (d.over) {
+                  d.vz -= _g * dt;
+                  d.z += d.vz * dt;
+                  d.x += d.vx * dt;
+                  d.y += d.vy * dt;
+                  d.phi += d.spin * dt;
+                  while (d.phi >= pi / 2) {
+                    d.phi -= pi / 2;
+                    d.top = d.next;
+                    d.next = _chooseNext(d, false);
+                  }
+                  if (d.z < -s * 3) {
+                    d.fallen = true;
+                    d.settled = true;
+                    onHit(HitKind.fall, 0.4, _pan(d.x));
+                  }
+                  continue;
+                }
+
                 final airborne = d.z > 0 || d.vz > 0;
                 var sp = sqrt(d.vx * d.vx + d.vy * d.vy);
 
@@ -864,7 +912,7 @@ jobs:
                     onHit(HitKind.table, (impact / (s * 13)).clamp(0.0, 1.0), _pan(d.x));
                   }
                 } else if (sp > 0) {
-                  final ns = max(0.0, sp - _friction * dt);
+                  final ns = max(0.0, sp - (d.falls ? _friction * 0.35 : _friction) * dt);
                   d.vx *= ns / sp;
                   d.vy *= ns / sp;
                   d.x += d.vx * dt;
@@ -888,14 +936,22 @@ jobs:
 
                 // kenarlar
                 if (d.y < maxY) d.entered = true;
-                if (d.x < minX) {
+                if (d.falls && (d.x < rail * 0.6 || d.x > w - rail * 0.6)) {
+                  // pervazı sıyırıp kenardan aşar
+                  d.over = true;
+                  d.vz = max(d.vz, 0.0) + s * 2;
+                  d.spin = max(d.spin, 12.0);
+                  onHit(HitKind.rail, 0.3, _pan(d.x));
+                  continue;
+                }
+                if (!d.falls && d.x < minX) {
                   d.x = minX;
                   if (d.vx < 0) {
                     onHit(HitKind.rail, (-d.vx / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
                     d.vx = -d.vx * 0.5;
                   }
                 }
-                if (d.x > maxX) {
+                if (!d.falls && d.x > maxX) {
                   d.x = maxX;
                   if (d.vx > 0) {
                     onHit(HitKind.rail, (d.vx / (s * 25)).clamp(0.0, 1.0), _pan(d.x));
@@ -919,7 +975,10 @@ jobs:
 
                 // yavaşladı: hedef yüz üstünde dur
                 final grounded = d.z == 0 && d.vz == 0;
-                if (grounded && sqrt(d.vx * d.vx + d.vy * d.vy) < s * 0.5) {
+                if (d.falls) {
+                  // düşecek zar durmasın: kenara doğru yuvarlanmaya devam eder
+                  if (grounded && sqrt(d.vx * d.vx + d.vy * d.vy) < s * 3) d.vx = d.side * s * 4;
+                } else if (grounded && sqrt(d.vx * d.vx + d.vy * d.vy) < s * 0.5) {
                   d.vx = 0;
                   d.vy = 0;
                   if (d.phi > pi / 4 || d.top != d.target) {
@@ -942,7 +1001,8 @@ jobs:
 
               // zar-zar
               final a = dice[0], b = dice[1];
-              if (!(a.settled && b.settled) && (a.z - b.z).abs() < s * 0.6) {
+              final apart = a.over || b.over || a.fallen || b.fallen;
+              if (!apart && !(a.settled && b.settled) && (a.z - b.z).abs() < s * 0.6) {
                 final dx = b.x - a.x, dy = b.y - a.y;
                 final dist = sqrt(dx * dx + dy * dy);
                 final minD = s * 1.05;
@@ -1031,6 +1091,7 @@ jobs:
                 canvas.saveLayer(Offset.zero & size, Paint()..color = Color.fromRGBO(0, 0, 0, opacity));
               }
               for (final d in list) {
+                if (d.fallen) continue;
                 _drawDie(canvas, d, sim.s);
               }
               if (opacity < 1) canvas.restore();
@@ -1038,19 +1099,26 @@ jobs:
 
             void _drawDie(Canvas canvas, TableDie d, double s) {
               final lift = d.z;
-              final scale = 1 + lift / (s * 5);
+              final scale = max(0.3, 1 + lift / (s * 5));
+              final dropping = lift < 0; // masanın kenarından aşağı düşüyor
+              if (dropping) {
+                final a = (1 + lift / (s * 3)).clamp(0.0, 1.0);
+                canvas.saveLayer(null, Paint()..color = Color.fromRGBO(0, 0, 0, a));
+              }
 
-              // gölge: zar yükseldikçe uzaklaşır ve yumuşar
-              final shadowCenter = Offset(d.x + lift * 0.35 + s * 0.06, d.y + lift * 0.5 + s * 0.08);
-              canvas.drawRRect(
-                RRect.fromRectAndRadius(
-                  Rect.fromCenter(center: shadowCenter, width: s * (1 + lift / (s * 8)), height: s * (1 + lift / (s * 8))),
-                  Radius.circular(s * 0.2),
-                ),
-                Paint()
-                  ..color = Color.fromRGBO(0, 0, 0, (0.55 - lift / (s * 12)).clamp(0.15, 0.55))
-                  ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.06 + lift * 0.06),
-              );
+              // gölge: zar yükseldikçe uzaklaşır ve yumuşar (düşerken altında masa yok)
+              if (!dropping) {
+                final shadowCenter = Offset(d.x + lift * 0.35 + s * 0.06, d.y + lift * 0.5 + s * 0.08);
+                canvas.drawRRect(
+                  RRect.fromRectAndRadius(
+                    Rect.fromCenter(center: shadowCenter, width: s * (1 + lift / (s * 8)), height: s * (1 + lift / (s * 8))),
+                    Radius.circular(s * 0.2),
+                  ),
+                  Paint()
+                    ..color = Color.fromRGBO(0, 0, 0, (0.55 - lift / (s * 12)).clamp(0.15, 0.55))
+                    ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.06 + lift * 0.06),
+                );
+              }
 
               canvas.save();
               canvas.translate(d.x, d.y - lift * 0.15);
@@ -1064,6 +1132,7 @@ jobs:
               if (wBack > 0.5) _face(canvas, d.next, left, wBack, s, 0.62 + 0.33 * sn);
               if (wTop > 0.5) _face(canvas, d.top, left + wBack, wTop, s, 1 - 0.25 * sn);
               canvas.restore();
+              if (dropping) canvas.restore();
             }
 
             void _face(Canvas canvas, int value, double left, double width, double s, double shade) {
@@ -1168,12 +1237,14 @@ jobs:
           BARBUT_EOF
           cat > lib/hand_screen.dart <<'BARBUT_EOF'
           import 'dart:async';
+          import 'dart:math';
 
           import 'package:flutter/material.dart';
           import 'package:flutter/scheduler.dart';
           import 'package:flutter/services.dart';
           import 'package:sensors_plus/sensors_plus.dart';
 
+          import 'die.dart';
           import 'errors.dart';
           import 'feel.dart';
           import 'game.dart';
@@ -1194,7 +1265,14 @@ jobs:
           }
 
           class _HandScreenState extends State<HandScreen> with SingleTickerProviderStateMixin {
+            /// Bir atışta zarın masadan düşme ihtimali (0.10 = her 10 atıştan biri).
+            static const dropChance = 0.10;
+
+            /// Düşen atışların ne kadarında iki zar birden düşer.
+            static const bothShare = 0.3;
+
             final game = Game();
+            final _rng = Random();
             late final CupSim cup = CupSim(onHit: _onCupHit);
             TableSim? table;
             final _frame = ValueNotifier<int>(0);
@@ -1204,6 +1282,8 @@ jobs:
             Phase phase = Phase.holding;
             Roll? pending, shown;
             bool verdictOn = false;
+            int fell = 0; // son atışta masadan düşen zar sayısı
+            bool verdictAbove = true; // sonuç yazısı zarların üstünde mi altında mı
             bool diceOnTable = false; // önceki atışın zarları masada duruyor
             bool sensorsOk = false;
             int throws = 0;
@@ -1314,7 +1394,12 @@ jobs:
               if ((phase != Phase.holding && phase != Phase.released) || game.over || t == null) return;
               final r = game.draw();
               pending = r;
-              t.launch([r.d1, r.d2], strength, startX, dirX);
+              var falls = const [false, false];
+              if (_rng.nextDouble() < dropChance) {
+                final one = _rng.nextBool();
+                falls = _rng.nextDouble() < bothShare ? const [true, true] : [one, !one];
+              }
+              t.launch([r.d1, r.d2], strength, startX, dirX, falls: falls);
               if (phase == Phase.holding) ImpactFeel.I.release(strength);
               setState(() {
                 phase = Phase.flying;
@@ -1357,17 +1442,26 @@ jobs:
             void _onSettled() {
               phase = Phase.result;
               final r = pending;
-              if (r == null) return;
-              final ends = game.endsGame(r);
+              final t = table;
+              if (r == null || t == null) return;
+              final fellNow = t.fallenCount;
+              // masadan düşen zar varsa atış sayılmaz: akçe değişmez, sıra aynı oyuncuda kalır
+              final ends = fellNow == 0 && game.endsGame(r);
+              final onTable = t.dice.where((d) => !d.fallen).toList();
+              final avgY = onTable.isEmpty
+                  ? t.size.height
+                  : onTable.map((d) => d.y).reduce((a, b) => a + b) / onTable.length;
               _timer?.cancel();
               _timer = Timer(const Duration(milliseconds: 250), () {
                 if (!mounted) return;
                 setState(() {
-                  game.apply(r);
+                  if (fellNow == 0) game.apply(r);
                   shown = r;
+                  fell = fellNow;
+                  verdictAbove = avgY > t.size.height * 0.5;
                   verdictOn = true;
                 });
-                Feel.I.playResult(r.out, finalRoll: ends);
+                Feel.I.playResult(fellNow > 0 ? Outcome.pass : r.out, finalRoll: ends);
                 _timer = Timer(const Duration(milliseconds: 1500), () {
                   if (!mounted || game.over) return;
                   cup.reset();
@@ -1389,6 +1483,7 @@ jobs:
                 game.reset();
                 shown = null;
                 pending = null;
+                fell = 0;
                 verdictOn = false;
                 diceOnTable = false;
                 phase = Phase.holding;
@@ -1409,6 +1504,11 @@ jobs:
                   } else if (t.size != size) {
                     t.size = size;
                   }
+                  // zarlar üstteki skorların ve alttaki yazıların altına girmesin
+                  final pad = MediaQuery.paddingOf(context);
+                  table!
+                    ..topInset = pad.top + 128
+                    ..bottomInset = pad.bottom + 130;
                   final diceOpacity = (phase == Phase.holding || phase == Phase.released) ? (diceOnTable ? 0.45 : 0.0) : 1.0;
                   return GestureDetector(
                     behavior: HitTestBehavior.opaque,
@@ -1430,7 +1530,7 @@ jobs:
                           child: CustomPaint(painter: DicePainter(table!, _frame, opacity: diceOpacity)),
                         ),
                       ),
-                      Positioned.fill(child: IgnorePointer(child: Center(child: _verdict()))),
+                      Positioned.fill(child: IgnorePointer(child: _verdict())),
                       Positioned(left: 0, right: 0, top: 0, child: SafeArea(child: _hud())),
                       Positioned(left: 0, right: 0, bottom: 0, child: SafeArea(child: _bottom())),
                     ]),
@@ -1456,9 +1556,14 @@ jobs:
                       IconButton(
                         onPressed: _menu,
                         icon: const Icon(Icons.tune, color: Color(0xCCE9E1CE)),
-                        tooltip: 'Ayarlar',
+                        tooltip: 'Ayarlar ve kurallar',
                       ),
                     ]),
+                    if (shown != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Align(alignment: Alignment.centerLeft, child: _lastThrow()),
+                      ),
                     ValueListenableBuilder<List<String>>(
                       valueListenable: ErrorLog.items,
                       builder: (context, list, _) => list.isEmpty
@@ -1498,21 +1603,68 @@ jobs:
                     ? const SizedBox.shrink()
                     : Builder(builder: (context) {
                         final who = '${r.by + 1}. oyuncu';
-                        final (String title, String sub, Color color) = switch (r.out) {
-                          Outcome.win => ('Barbut!', '$who ${r.amount} akçe kazandı', const Color(0xFFB8F0D2)),
-                          Outcome.lose => ('Kaybettiren atış', '$who ${r.amount} akçe kaybetti', const Color(0xFFFFB3BF)),
-                          Outcome.pass => ('Sonuçsuz', 'Zar rakibe geçti', Palette.ink),
-                        };
+                        final dice = '${r.d1}–${r.d2}';
+                        final (String title, String sub, Color color) = fell > 0
+                            ? (
+                                fell == 2 ? 'İki zar da düştü' : 'Zar masadan düştü',
+                                'Atış sayılmaz · $who yeniden atıyor',
+                                const Color(0xFFF2D58A),
+                              )
+                            : switch (r.out) {
+                                Outcome.win => ('Barbut!', '$who $dice attı · ${r.amount} akçe kazandı', const Color(0xFFB8F0D2)),
+                                Outcome.lose => (
+                                    'Kaybettiren atış',
+                                    '$who $dice attı · ${r.amount} akçe kaybetti',
+                                    const Color(0xFFFFB3BF)
+                                  ),
+                                Outcome.pass => ('Sonuçsuz', '$who $dice attı · zar rakibe geçti', Palette.ink),
+                              };
                         const glow = [Shadow(color: Color(0xE6000000), blurRadius: 18)];
-                        return Padding(
-                          padding: EdgeInsets.only(bottom: (table?.s ?? 60.0) * 3),
-                          child: Column(mainAxisSize: MainAxisSize.min, children: [
-                            Text(title,
-                                style: TextStyle(fontFamily: Palette.display, fontSize: 40, color: color, shadows: glow)),
-                            Text(sub, style: const TextStyle(color: Palette.ink, fontSize: 16, shadows: glow)),
-                          ]),
+                        return Align(
+                          // zarların üstüne binmesin: zarlar aşağıdaysa yukarıda, yukarıdaysa aşağıda
+                          alignment: Alignment(0, verdictAbove ? -0.32 : 0.3),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            child: Column(mainAxisSize: MainAxisSize.min, children: [
+                              Text(title,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(fontFamily: Palette.display, fontSize: 36, color: color, shadows: glow)),
+                              const SizedBox(height: 4),
+                              Text(sub,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(color: Palette.ink, fontSize: 16, shadows: glow)),
+                            ]),
+                          ),
                         );
                       }),
+              );
+            }
+
+            /// Üstte sürekli duran şerit: son atışı kim attı, ne geldi, ne oldu.
+            Widget _lastThrow() {
+              final r = shown!;
+              final (String what, Color color) = fell > 0
+                  ? ('zar düştü, sayılmaz', const Color(0xFFF2D58A))
+                  : switch (r.out) {
+                      Outcome.win => ('kazandı +${r.amount}', Palette.win),
+                      Outcome.lose => ('kaybetti −${r.amount}', Palette.lose),
+                      Outcome.pass => ('sonuçsuz', const Color(0xB3E9E1CE)),
+                    };
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(color: const Color(0x8C000000), borderRadius: BorderRadius.circular(16)),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Text('Son atış', style: TextStyle(color: Color(0x99E9E1CE), fontSize: 13)),
+                  const SizedBox(width: 10),
+                  if (fell == 0) ...[
+                    DieFace(value: r.d1, size: 20, shadow: false),
+                    const SizedBox(width: 3),
+                    DieFace(value: r.d2, size: 20, shadow: false),
+                    const SizedBox(width: 10),
+                  ],
+                  Text('${r.by + 1}. oyuncu · ', style: const TextStyle(color: Palette.ink, fontSize: 13)),
+                  Text(what, style: TextStyle(color: color, fontSize: 13, fontWeight: FontWeight.w700)),
+                ]),
               );
             }
 
@@ -1536,31 +1688,43 @@ jobs:
                   ]),
                 );
               }
-              final turn = 'Sıra ${game.turn + 1}. oyuncuda';
-              final vessel = cup.palm ? 'zarlar avucunda' : 'zarlar fincanda';
-              final String text;
+              final throwing = phase == Phase.released || phase == Phase.flying;
+              final turn = throwing ? '${game.turn + 1}. oyuncu atıyor' : 'Sıra ${game.turn + 1}. oyuncuda';
+              final vessel = cup.palm ? 'Zarlar avucunda' : 'Zarlar fincanda';
+              final String hint;
               if (phase != Phase.holding) {
-                text = '';
+                hint = '';
               } else if (!sensorsOk) {
-                text = '$turn.\nAtmak için ekranda aşağıdan yukarı kaydır.';
+                hint = 'Atmak için ekranda aşağıdan yukarı kaydır.';
               } else if (throws < 2) {
-                text = '$turn, $vessel.\nTelefonu salla, sonra ucunu masaya doğru çevir: zarları döker gibi.\nYa da ekranda aşağıdan yukarı kaydır.';
+                hint = '$vessel. Telefonu salla, sonra ucunu masaya doğru çevir: zarları döker gibi.\n'
+                    'Ya da ekranda aşağıdan yukarı kaydır.';
               } else {
-                text = '$turn · $vessel';
+                hint = vessel;
               }
+              const shadow = [Shadow(color: Colors.black, blurRadius: 10)];
               return IgnorePointer(
-                child: AnimatedOpacity(
-                  opacity: text.isEmpty ? 0 : 0.85,
-                  duration: const Duration(milliseconds: 300),
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(32, 0, 32, 40),
-                    child: Text(
-                      text,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(32, 0, 32, 36),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Text(
+                      turn,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          color: Palette.ink, fontSize: 15, height: 1.45, shadows: [Shadow(color: Colors.black, blurRadius: 10)]),
+                      style: const TextStyle(fontFamily: Palette.display, fontSize: 26, color: Palette.gold, shadows: shadow),
                     ),
-                  ),
+                    AnimatedOpacity(
+                      opacity: hint.isEmpty ? 0 : 0.85,
+                      duration: const Duration(milliseconds: 300),
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          hint.isEmpty ? ' ' : hint,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Palette.ink, fontSize: 14, height: 1.4, shadows: shadow),
+                        ),
+                      ),
+                    ),
+                  ]),
                 ),
               );
             }
@@ -1568,9 +1732,11 @@ jobs:
             void _menu() {
               showModalBottomSheet<void>(
                 context: context,
+                isScrollControlled: true,
                 backgroundColor: Palette.surface,
                 builder: (ctx) => StatefulBuilder(
                   builder: (ctx, setSheet) => SafeArea(
+                    child: SingleChildScrollView(
                     child: Column(mainAxisSize: MainAxisSize.min, children: [
                       SwitchListTile(
                         title: const Text('Ses'),
@@ -1621,7 +1787,14 @@ jobs:
                           Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const TableScreen()));
                         },
                       ),
+                      const ExpansionTile(
+                        leading: Icon(Icons.casino_outlined),
+                        title: Text('Atışlar ve kurallar'),
+                        childrenPadding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+                        children: [RulesLegend()],
+                      ),
                     ]),
+                    ),
                   ),
                 ),
               );
@@ -1923,7 +2096,8 @@ jobs:
                     const SizedBox(height: 14),
                     const Text(
                       'Her oyuncu 100 akçeyle başlar, her karar 10 akçedir. Diğer atışlar sonuçsuzdur. '
-                      'Zar her atıştan sonra rakibe geçer. Akçesi biten masadan kalkar.',
+                      'Zar her atıştan sonra rakibe geçer. Masadan düşen zar atışı geçersiz kılar, '
+                      'aynı oyuncu yeniden atar. Akçesi biten masadan kalkar.',
                       style: TextStyle(color: Palette.muted, height: 1.45),
                     ),
                   ],
