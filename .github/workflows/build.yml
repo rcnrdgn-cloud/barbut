@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 12: gerçek zar kayıtlarından sesler, düzeltilmiş 3B zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 13: köşeleri yuvarlak gerçek zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -1307,6 +1307,9 @@ jobs:
             // ışık: sol üstten, yukarıdan (dünya: X sağ, Y ekranın yukarısı, Z yukarı)
             static const _lx = -0.38, _ly = 0.46, _lz = 0.80;
 
+            /// Kenar ve köşe yuvarlaklığı (zar boyuna oranla). Gerçek zarlarda ~%10–15.
+            static const _round = 0.12;
+
             // yüz düzlemindeki iki kenar ekseni (zarın yerel ekseni olarak)
             static const _uAxis = [0, 1, 1, 2, 2, 1, 1];
             static const _vAxis = [0, 0, 2, 0, 0, 2, 0];
@@ -1363,7 +1366,8 @@ jobs:
                 path,
                 Paint()
                   ..color = Color.fromRGBO(0, 0, 0, (0.5 - lift / (s * 10)).clamp(0.12, 0.5))
-                  ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.05 + lift * 0.08),
+                  ..strokeJoin = StrokeJoin.round
+                  ..maskFilter = MaskFilter.blur(BlurStyle.normal, s * 0.07 + lift * 0.08),
               );
               if (lift < s * 0.05) {
                 // değme gölgesi: zar masaya oturunca tabanında koyu, keskin bir çizgi
@@ -1426,17 +1430,41 @@ jobs:
               }
               faces.sort((a, b) => a.view.compareTo(b.view));
 
-              // 1) gövde: yüzlerin tam dörtgenleri, biraz koyu (yuvarlak kenarların pahı)
-              for (final fc in faces) {
-                final path = Path()..addPolygon([fc.p00, fc.p10, fc.p11, fc.p01], true);
-                canvas.drawPath(path, Paint()..color = Color.lerp(const Color(0xFF8A7A60), Palette.boneShade, fc.light)!);
+              if (faces.isEmpty) {
+                if (dropping) canvas.restore();
+                return;
               }
-              // 2) yüzler: yuvarlatılmış, ışığa göre aydınlık, üstünde benekler
+
+              // 1) gövde: köşeleri ve kenarları yuvarlatılmış küp. İçteki küçük küpün
+              //    görüntüsü, yuvarlaklık yarıçapı kadar yuvarlak uçlu kalemle şişirilir:
+              //    çıkan şekil tam olarak kenarları yuvarlak bir küpün dış hatlarıdır.
+              const k = 0.5 - _round;
+              final inner = <Offset>[];
+              for (final lx in const [-k, k]) {
+                for (final ly in const [-k, k]) {
+                  for (final lz in const [-k, k]) {
+                    inner.add(_proj(_world(d, s, hz, lx, ly, lz), size));
+                  }
+                }
+              }
+              final body = Path()..addPolygon(_hull(inner), true);
+              final meanLight = faces.map((f) => f.light).reduce((a, b) => a + b) / faces.length;
+              final edge = Color.lerp(const Color(0xFF9A8A6E), Palette.boneShade, meanLight)!;
+              canvas.drawPath(body, Paint()..color = edge);
+              canvas.drawPath(
+                body,
+                Paint()
+                  ..color = edge
+                  ..style = PaintingStyle.stroke
+                  ..strokeWidth = 2 * _round * s
+                  ..strokeJoin = StrokeJoin.round,
+              );
+              // 2) düz yüzler: yuvarlak kenardan yüzün düzlüğüne yumuşak geçiş, üstünde benekler
               for (final fc in faces) {
                 canvas.save();
                 final a = fc.p10 - fc.p00, b = fc.p01 - fc.p00;
                 canvas.transform(Float64List.fromList([a.dx, a.dy, 0, 0, b.dx, b.dy, 0, 0, 0, 0, 1, 0, fc.p00.dx, fc.p00.dy, 0, 1]));
-                _paintFace(canvas, fc.face, fc.light);
+                _paintFace(canvas, fc.face, fc.light, edge);
                 canvas.restore();
               }
               if (dropping) canvas.restore();
@@ -1446,12 +1474,22 @@ jobs:
             static double _faceSignOf(int f) => const [0.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0][f];
 
             /// Birim karede (0..1) bir yüz.
-            void _paintFace(Canvas canvas, int value, double light) {
-              const inset = 0.035;
-              final rect = const Rect.fromLTWH(inset, inset, 1 - 2 * inset, 1 - 2 * inset);
-              final rr = RRect.fromRectAndRadius(rect, const Radius.circular(0.17));
+            void _paintFace(Canvas canvas, int value, double light, Color edge) {
               final base = Color.lerp(const Color(0xFF9C8C70), Palette.bone, light)!;
               final hi = Color.lerp(const Color(0xFFAE9E82), Palette.boneLight, light)!;
+              // yuvarlak kenar bandı: dıştan içe, kenar renginden yüz rengine 5 adımda
+              const steps = 5;
+              for (var i = 1; i < steps; i++) {
+                final t = i / steps;
+                final ins = _round * t;
+                final band = RRect.fromRectAndRadius(
+                  Rect.fromLTWH(ins, ins, 1 - 2 * ins, 1 - 2 * ins),
+                  Radius.circular(_round * (1.05 - 0.5 * t)),
+                );
+                canvas.drawRRect(band, Paint()..color = Color.lerp(edge, base, t * t * (3 - 2 * t))!);
+              }
+              const rect = Rect.fromLTWH(_round, _round, 1 - 2 * _round, 1 - 2 * _round);
+              final rr = RRect.fromRectAndRadius(rect, const Radius.circular(_round * 0.5));
               canvas.drawRRect(
                 rr,
                 Paint()
