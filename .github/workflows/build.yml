@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 20: tavla adları): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 21: tavla adları + ileri savurarak atış): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -3589,6 +3589,94 @@ jobs:
             test('ipucu metni', () {'''),
           ])
           print('Tavla adları eklendi')
+          PATCH_EOF
+
+      - name: İleri savurarak atış (sürüm 21)
+        working-directory: barbut_app
+        run: |
+          python3 - <<'PATCH_EOF'
+          import sys
+
+          def edit(path, pairs):
+              s = open(path, encoding='utf-8').read()
+              for old, new in pairs:
+                  if s.count(old) != 1:
+                      sys.exit(f'YAMA BULUNAMADI: {path}: {old[:70]!r}')
+                  s = s.replace(old, new)
+              open(path, 'w', encoding='utf-8').write(s)
+
+          edit('lib/hand_screen.dart', [
+              ("double _tiltRate = 0; // ucun aşağı devrilme hızı (rad/s)",
+               r'''double _tiltRate = 0; // ucun aşağı devrilme hızı (rad/s)
+
+            /// İleri savurma: telefon yere paralelken ileri itilip birden durdurulur (m/s²).
+            static const tossPush = 9.0, tossStop = 12.0;
+            DateTime _tossPushAt = DateTime(0);
+            DateTime? _tossStopAt, _tossCalmFrom;
+            double _tossPeak = 0;'''),
+              ("if (!sensorsOk && mounted) setState(() => sensorsOk = true);",
+               "if (!sensorsOk && mounted) setState(() => sensorsOk = true);\n"
+               "                    _checkToss(e.x, e.y, e.z);"),
+              ("/* ---------------- elde ---------------- */",
+               r'''/// Fincanı yere paralel tutup ileri savurma: önce telefonun ucu yönünde güçlü bir
+            /// itiş, hemen ardından sert bir duruş ve en az 70 ms sakinlik. Sallamada ivme
+            /// sürekli yön değiştirdiği için bu sakinlik oluşmaz, yanlışlıkla atış olmaz.
+            void _checkToss(double ex, double ey, double ez) {
+              if (phase != Phase.holding || game.over) {
+                _tossStopAt = null;
+                return;
+              }
+              final now = DateTime.now();
+              if (now.difference(_phaseStart).inMilliseconds < 300) return;
+              final lx = ex - _gx, ly = ey - _gy, lz = ez - _gz; // yerçekimi çıkarılmış ivme
+              final level = _gz > 6.5; // ekran yukarı, aşağı yukarı yere paralel
+              if (level && ly > tossPush && ly.abs() > 1.5 * lx.abs()) {
+                _tossPushAt = now;
+                _tossPeak = max(_tossPeak, ly);
+              }
+              final pushed = now.difference(_tossPushAt).inMilliseconds < 350;
+              if (level && pushed && ly < -tossStop) {
+                _tossStopAt = now;
+                _tossCalmFrom = null;
+              }
+              final stop = _tossStopAt;
+              if (stop != null) {
+                final calm = sqrt(lx * lx + ly * ly + lz * lz) < 6;
+                _tossCalmFrom = calm ? (_tossCalmFrom ?? now) : null;
+                final calmFrom = _tossCalmFrom;
+                if (now.difference(stop).inMilliseconds > 450) {
+                  _tossStopAt = null;
+                  _tossPeak = 0;
+                } else if (calmFrom != null && now.difference(calmFrom).inMilliseconds >= 70) {
+                  final peak = _tossPeak;
+                  _tossStopAt = null;
+                  _tossPeak = 0;
+                  _toss(peak);
+                }
+              }
+              if (!pushed && _tossStopAt == null) _tossPeak = 0;
+            }
+
+            void _toss(double peak) {
+              if (phase != Phase.holding || game.over || table == null) return;
+              // savurma ne kadar sertse, sallama ne kadar çoksa zarlar o kadar güçlü gider
+              _releaseStrength = max(_shakeStrength, (0.6 + peak / 30).clamp(0.6, 1.4));
+              _shakeEnergy = 0;
+              _releasedAt = DateTime.now();
+              ImpactFeel.I.release(_releaseStrength);
+              setState(() {
+                phase = Phase.released;
+                diceOnTable = false;
+                verdictOn = false;
+              });
+              _launchPoured();
+            }
+
+            /* ---------------- elde ---------------- */'''),
+              ("'ucu yatayı aşağı doğru geçtiği an zarlar dökülür.';",
+               "'ucunu yatayın altına indir ya da telefonu yatay tutup ileri doğru savur: zarlar dökülür.';"),
+          ])
+          print('İleri savurarak atış eklendi')
           PATCH_EOF
 
       - name: Sesleri üret
