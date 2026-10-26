@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 22: tavla adları, ileri savurma, seyrek düşme): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 23: sallarken anında atış): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -3591,7 +3591,7 @@ jobs:
           print('Tavla adları eklendi')
           PATCH_EOF
 
-      - name: Atış hareketleri ve ayarlar (sürüm 22)
+      - name: Atış hareketleri ve ayarlar (sürüm 23)
         working-directory: barbut_app
         run: |
           python3 - <<'PATCH_EOF'
@@ -3609,10 +3609,10 @@ jobs:
               # masadan düşme: her 10 atıştan biri yerine yaklaşık her 33 atıştan biri
               ("static const dropChance = 0.10;", "static const dropChance = 0.03;"),
               ("static const bothShare = 0.3;", "static const bothShare = 0.2;"),
-              # eğerek dökme daha çabuk: sallama sonrası bekleme kısaldı, hızlı devirmede hiç beklenmez
+              # eğerek dökme: sallarken ucun aşağı devrilmeye başladığı an beklemeden dökülür
               ("static const shakeQuietMs = 120;", "static const shakeQuietMs = 70;"),
               ("if (_armed && tilt > pourAngle && !shaking &&",
-               "if (_armed && tilt > pourAngle && (!shaking || _tiltRate.abs() > 2.5) &&"),
+               "if (_armed && tilt > pourAngle && (!shaking || _tiltRate > 1.0) &&"),
               ("DateTime.now().difference(_releasedAt).inMilliseconds > 1000",
                "DateTime.now().difference(_releasedAt).inMilliseconds > 500"),
               # sonuç yazısının altındaki açıklama yalnızca zar düştüğünde kalsın
@@ -3626,7 +3626,9 @@ jobs:
             DateTime _tossPushAt = DateTime(0), _tossBackAt = DateTime(0);
             DateTime? _tossStopAt, _tossCalmFrom;
             bool _tossUp = false, _tossBlocked = false;
-            double _tossPeak = 0;'''),
+            double _tossPeak = 0;
+            final List<(int, double, double)> _tossHist = []; // (ms, |ileri ivme|, |ivme|)
+            int _tossTurnCount = 0;'''),
               ("if (!sensorsOk && mounted) setState(() => sensorsOk = true);",
                "if (!sensorsOk && mounted) setState(() => sensorsOk = true);\n"
                "                    _checkToss(e.x, e.y, e.z);"),
@@ -3638,6 +3640,8 @@ jobs:
             void _checkToss(double ex, double ey, double ez) {
               if (phase != Phase.holding || game.over) {
                 _tossStopAt = null;
+                _tossHist.clear();
+                _tossTurnCount = 0;
                 return;
               }
               final now = DateTime.now();
@@ -3657,6 +3661,35 @@ jobs:
               final lu = lx * ux + ly * uy + lz * uz;
               final sx = lx - lf * fx - lu * ux, sy = ly - lf * fy - lu * uy, sz = lz - lf * fz - lu * uz;
               final lat = sqrt(sx * sx + sy * sy + sz * sz); // yana bileşen
+
+              // --- sallama sürerken: hareket ileri döndüğü an atış ---
+              // Son yarım saniyedeki en güçlü ileri-geri hamle sallamanın kendi genliğidir.
+              // Ondan belirgin güçlü bir ileri itiş başladığı an (iki ölçüm, ~40 ms) zarlar atılır.
+              final nowMs = now.millisecondsSinceEpoch;
+              final mag = sqrt(lx * lx + ly * ly + lz * lz);
+              _tossHist.removeWhere((h) => nowMs - h.$1 > 500);
+              var env = 0.0;
+              int? firstMove;
+              for (final h in _tossHist) {
+                if (nowMs - h.$1 <= 30) continue;
+                if (h.$2 > env) env = h.$2;
+                if (h.$3 > 4 && (firstMove == null || h.$1 < firstMove)) firstMove = h.$1;
+              }
+              _tossHist.add((nowMs, lf.abs(), mag));
+              final shakingNow = firstMove != null && nowMs - firstMove >= 250;
+              final turned = shakingNow && level && lf > tossPush && lf > 1.4 * env && lf > 1.2 * lat;
+              _tossTurnCount = turned ? _tossTurnCount + 1 : 0;
+              if (turned) _tossPeak = max(_tossPeak, lf);
+              if (_tossTurnCount >= 2) {
+                final peak = _tossPeak;
+                _tossTurnCount = 0;
+                _tossHist.clear();
+                _tossStopAt = null;
+                _toss(peak);
+                return;
+              }
+
+              // --- telefon dururken: ileri itip durdurma ---
 
               final up = level && lf > tossPush && lf > 1.2 * lat;
               if (up && !_tossUp) {
@@ -3706,9 +3739,9 @@ jobs:
 
             /* ---------------- elde ---------------- */'''),
               ("'ucu yatayı aşağı doğru geçtiği an zarlar dökülür.';",
-               "'ucunu yatayın altına indir ya da fincanı ileri savurur gibi telefonu ileri itip durdur: zarlar dökülür.';"),
+               "'ucunu aşağı devir ya da ileri savur: zarlar anında dökülür.';"),
           ])
-          print('Atış hareketleri ve ayarlar uygulandı')
+          print('Atış hareketleri ve ayarlar uygulandı (sürüm 23)')
           PATCH_EOF
 
       - name: Sesleri üret
