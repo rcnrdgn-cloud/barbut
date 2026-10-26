@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 23: sallarken anında atış): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 24: sallama pozisyonundan çıkınca anında atış): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -3591,7 +3591,7 @@ jobs:
           print('Tavla adları eklendi')
           PATCH_EOF
 
-      - name: Atış hareketleri ve ayarlar (sürüm 23)
+      - name: Atış hareketleri ve ayarlar (sürüm 24)
         working-directory: barbut_app
         run: |
           python3 - <<'PATCH_EOF'
@@ -3612,7 +3612,7 @@ jobs:
               # eğerek dökme: sallarken ucun aşağı devrilmeye başladığı an beklemeden dökülür
               ("static const shakeQuietMs = 120;", "static const shakeQuietMs = 70;"),
               ("if (_armed && tilt > pourAngle && !shaking &&",
-               "if (_armed && tilt > pourAngle && (!shaking || _tiltRate > 1.0) &&"),
+               "if (_armed && tilt > pourAngle && (!shaking || _tiltSpeed > 60) &&"),
               ("DateTime.now().difference(_releasedAt).inMilliseconds > 1000",
                "DateTime.now().difference(_releasedAt).inMilliseconds > 500"),
               # sonuç yazısının altındaki açıklama yalnızca zar düştüğünde kalsın
@@ -3628,7 +3628,51 @@ jobs:
             bool _tossUp = false, _tossBlocked = false;
             double _tossPeak = 0;
             final List<(int, double, double)> _tossHist = []; // (ms, |ileri ivme|, |ivme|)
-            int _tossTurnCount = 0;'''),
+            int _tossTurnCount = 0;
+
+            /// Sallama pozisyonu: telefonun ortalama tutuş eğimi ve sallarken doğal sallanması.
+            /// Uç bu açıdan düze/aşağı doğru, sallanmadan belirgin fazla inmeye başlayınca dökülür.
+            static const poseDrop = 5.0, poseRatio = 1.15; // en az iniş (°), sallanmaya oranı
+            double? _poseTilt;
+            int _poseLastMs = 0;
+            double _poseLastTilt = 0, _tiltSpeed = 0; // ucun aşağı inme hızı (°/sn)
+            final List<(int, double)> _poseHist = [];'''),
+              ("if (tilt <= rearmAngle) _armed = true;",
+               r'''if (tilt <= rearmAngle) _armed = true;
+
+              // --- sallama pozisyonundan çıkış: yatayı beklemeden anında dökülür ---
+              final nowMs = DateTime.now().millisecondsSinceEpoch;
+              if (nowMs - _poseLastMs > 300) {
+                // yeni tutuş (yeni atış ya da uzun ara): ölçümü baştan başlat
+                _poseTilt = null;
+                _poseHist.clear();
+                _tiltSpeed = 0;
+                _poseLastTilt = tilt;
+              }
+              final dt = ((nowMs - _poseLastMs) / 1000).clamp(0.0, 0.1);
+              _poseLastMs = nowMs;
+              if (dt > 0.004) {
+                _tiltSpeed = 0.5 * _tiltSpeed + 0.5 * (tilt - _poseLastTilt) / dt;
+                _poseLastTilt = tilt;
+              }
+              final pose = _poseTilt ?? tilt;
+              final dev = tilt - pose; // tutuş açısından ne kadar aşağı indi
+              _poseHist.removeWhere((h) => nowMs - h.$1 > 800);
+              var swing = 0.0;
+              for (final h in _poseHist) {
+                if (nowMs - h.$1 > 100 && h.$2 > swing) swing = h.$2;
+              }
+              if (DateTime.now().difference(_phaseStart).inMilliseconds > 300 &&
+                  dev > max(poseDrop, poseRatio * swing) &&
+                  _tiltSpeed > 15) {
+                _poseTilt = null;
+                _poseHist.clear();
+                _armed = false;
+                _release();
+                return;
+              }
+              _poseHist.add((nowMs, dev.abs()));
+              _poseTilt = pose + (tilt - pose) * (1 - exp(-dt / 0.6));'''),
               ("if (!sensorsOk && mounted) setState(() => sensorsOk = true);",
                "if (!sensorsOk && mounted) setState(() => sensorsOk = true);\n"
                "                    _checkToss(e.x, e.y, e.z);"),
@@ -3676,8 +3720,8 @@ jobs:
                 if (h.$3 > 4 && (firstMove == null || h.$1 < firstMove)) firstMove = h.$1;
               }
               _tossHist.add((nowMs, lf.abs(), mag));
-              final shakingNow = firstMove != null && nowMs - firstMove >= 250;
-              final turned = shakingNow && level && lf > tossPush && lf > 1.4 * env && lf > 1.2 * lat;
+              final shakingNow = firstMove != null && nowMs - firstMove >= 150;
+              final turned = shakingNow && level && lf > tossPush && lf > 1.25 * env && lf > 1.2 * lat;
               _tossTurnCount = turned ? _tossTurnCount + 1 : 0;
               if (turned) _tossPeak = max(_tossPeak, lf);
               if (_tossTurnCount >= 2) {
@@ -3739,9 +3783,9 @@ jobs:
 
             /* ---------------- elde ---------------- */'''),
               ("'ucu yatayı aşağı doğru geçtiği an zarlar dökülür.';",
-               "'ucunu aşağı devir ya da ileri savur: zarlar anında dökülür.';"),
+               "'telefonu düze ya da aşağı indir veya ileri savur: zarlar anında dökülür.';"),
           ])
-          print('Atış hareketleri ve ayarlar uygulandı (sürüm 23)')
+          print('Atış hareketleri ve ayarlar uygulandı (sürüm 24)')
           PATCH_EOF
 
       - name: Sesleri üret
