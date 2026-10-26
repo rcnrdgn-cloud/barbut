@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 19: zıplarken gerçekçi boyut): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 20: profesyonel ekran düzeni): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -2060,8 +2060,8 @@ jobs:
                   // zarlar üstteki skorların ve alttaki yazıların altına girmesin
                   final pad = MediaQuery.paddingOf(context);
                   table!
-                    ..topInset = pad.top + 128
-                    ..bottomInset = pad.bottom + 170;
+                    ..topInset = pad.top + 140
+                    ..bottomInset = pad.bottom + 190;
                   final diceOpacity = (phase == Phase.holding || phase == Phase.released) ? (diceOnTable ? 1.0 : 0.0) : 1.0;
                   return GestureDetector(
                     behavior: HitTestBehavior.opaque,
@@ -2094,20 +2094,27 @@ jobs:
               );
             }
 
+            /* ---------------- ekran bilgileri ---------------- */
+
+            static String _name(int i) => 'Oyuncu ${i + 1}';
+
+            // küçük, aralıklı büyük harf etiketler (SIRADA, HEDEF, SON ATIŞ …)
+            static const _label = TextStyle(
+              color: Color(0x99E9E1CE),
+              fontSize: 10.5,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1.6,
+            );
+            static const _glow = [Shadow(color: Color(0xE6000000), blurRadius: 16)];
+            static const _goldSoft = Color(0xFFF2D58A);
+
             Widget _hud() => Padding(
-                  padding: const EdgeInsets.fromLTRB(28, 26, 22, 0),
+                  padding: const EdgeInsets.fromLTRB(20, 22, 12, 0),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                     Row(children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                        decoration: BoxDecoration(color: const Color(0x8C000000), borderRadius: BorderRadius.circular(20)),
-                        child: Row(mainAxisSize: MainAxisSize.min, children: [
-                          _score(0),
-                          Container(width: 1, height: 16, color: const Color(0x40FFFFFF), margin: const EdgeInsets.symmetric(horizontal: 12)),
-                          _score(1),
-                        ]),
-                      ),
-                      const Spacer(),
+                      Expanded(child: _score(0)),
+                      const SizedBox(width: 8),
+                      Expanded(child: _score(1)),
                       IconButton(
                         onPressed: _menu,
                         icon: const Icon(Icons.tune, color: Color(0xCCE9E1CE)),
@@ -2116,8 +2123,8 @@ jobs:
                     ]),
                     if (shown != null)
                       Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Align(alignment: Alignment.centerLeft, child: _lastThrow()),
+                        padding: const EdgeInsets.only(top: 8, right: 8),
+                        child: _lastThrow(),
                       ),
                     ValueListenableBuilder<List<String>>(
                       valueListenable: ErrorLog.items,
@@ -2137,16 +2144,50 @@ jobs:
                   ]),
                 );
 
+            /// Oyuncu kartı: ad, akçe, sıradaysa altın çerçeve ve "SIRADA" işareti.
             Widget _score(int i) {
               final active = !game.over && game.turn == i;
-              return Text(
-                '${i + 1}. oyuncu  ${game.akce[i]}',
-                style: TextStyle(
-                  color: active ? Palette.gold : const Color(0xB3E9E1CE),
-                  fontWeight: active ? FontWeight.w700 : FontWeight.w400,
-                  fontSize: 15,
+              final winner = game.winner == i;
+              return AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                padding: const EdgeInsets.fromLTRB(12, 8, 10, 9),
+                decoration: BoxDecoration(
+                  color: const Color(0x99000000),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: active || winner ? const Color(0xCCD4B158) : const Color(0x1FFFFFFF)),
                 ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Text(_name(i).toUpperCase(), style: _label.copyWith(color: active ? Palette.gold : null)),
+                    const Spacer(),
+                    if (active || winner)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(color: const Color(0x33D4B158), borderRadius: BorderRadius.circular(6)),
+                        child: Text(winner ? 'GALİP' : 'SIRADA',
+                            style: _label.copyWith(color: Palette.gold, fontSize: 9, letterSpacing: 1.2)),
+                      ),
+                  ]),
+                  const SizedBox(height: 2),
+                  Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+                    Text('${game.akce[i]}',
+                        style: const TextStyle(fontFamily: Palette.display, fontSize: 24, color: Palette.ink, height: 1.1)),
+                    const SizedBox(width: 5),
+                    const Text('akçe', style: TextStyle(color: Color(0x99E9E1CE), fontSize: 12)),
+                  ]),
+                ]),
               );
+            }
+
+            /// Sonucun kısa adı ve rengi (son atış şeridi ve sonuç ekranı için).
+            (String, Color) _outcomeTag(Roll r) {
+              if (fell > 0) return ('Geçersiz', _goldSoft);
+              return switch (r.out) {
+                Outcome.first => ('Hedef ${r.sum}', _goldSoft),
+                Outcome.win => ('Geçti  +${r.amount}', Palette.win),
+                Outcome.lose => ('Geçemedi  −${r.amount}', Palette.lose),
+                Outcome.tie => ('Berabere', const Color(0xB3E9E1CE)),
+              };
             }
 
             Widget _verdict() {
@@ -2157,46 +2198,73 @@ jobs:
                 child: r == null
                     ? const SizedBox.shrink()
                     : Builder(builder: (context) {
-                        final who = '${r.by + 1}. oyuncu';
-                        final dice = '${r.d1}–${r.d2}';
-                        final (String title, String sub, Color color) = fell > 0
-                            ? (
-                                fell == 2 ? 'İki zar da düştü' : 'Zar masadan düştü',
-                                'Atış sayılmaz · $who yeniden atıyor',
-                                const Color(0xFFF2D58A),
-                              )
-                            : switch (r.out) {
-                                Outcome.first => (
-                                    'Hedef ${r.sum}',
-                                    '$who $dice attı · şimdi ${2 - r.by}. oyuncu geçmeye çalışacak',
-                                    const Color(0xFFF2D58A)
-                                  ),
-                                Outcome.win => (
-                                    'Geçti!',
-                                    '$who ${r.sum} attı · hedef ${r.target} geçildi · ${r.amount} akçe kazandı',
-                                    const Color(0xFFB8F0D2)
-                                  ),
-                                Outcome.lose => (
-                                    'Geçemedi',
-                                    '$who ${r.sum} attı · hedef ${r.target} geçilemedi · ${2 - r.by}. oyuncu ${r.amount} akçe kazandı',
-                                    const Color(0xFFFFB3BF)
-                                  ),
-                                Outcome.tie => ('Berabere', '$who da ${r.sum} attı · akçe el değiştirmedi', Palette.ink),
-                              };
-                        const glow = [Shadow(color: Color(0xE6000000), blurRadius: 18)];
+                        final who = _name(r.by);
+                        final String kicker, title, detail, result;
+                        final Color color;
+                        if (fell > 0) {
+                          kicker = '$who · ATIŞ GEÇERSİZ';
+                          title = fell == 2 ? 'İki zar da düştü' : 'Zar masadan düştü';
+                          detail = 'Masadan düşen zar sayılmaz.';
+                          result = '$who yeniden atacak';
+                          color = _goldSoft;
+                        } else {
+                          switch (r.out) {
+                            case Outcome.first:
+                              kicker = '$who · İLK ATIŞ';
+                              title = 'Hedef ${r.sum}';
+                              detail = '${r.d1} + ${r.d2} = ${r.sum}';
+                              result = 'Şimdi ${_name(1 - r.by)} atacak';
+                              color = _goldSoft;
+                            case Outcome.win:
+                              kicker = '$who · İKİNCİ ATIŞ';
+                              title = 'Hedef geçildi';
+                              detail = 'Atılan ${r.sum}  ·  Hedef ${r.target}';
+                              result = '$who  +${r.amount} akçe';
+                              color = const Color(0xFFB8F0D2);
+                            case Outcome.lose:
+                              kicker = '$who · İKİNCİ ATIŞ';
+                              title = 'Hedef geçilemedi';
+                              detail = 'Atılan ${r.sum}  ·  Hedef ${r.target}';
+                              result = '${_name(1 - r.by)}  +${r.amount} akçe';
+                              color = const Color(0xFFFFB3BF);
+                            case Outcome.tie:
+                              kicker = '$who · İKİNCİ ATIŞ';
+                              title = 'Berabere';
+                              detail = 'Atılan ${r.sum}  ·  Hedef ${r.target}';
+                              result = 'Akçe el değiştirmedi';
+                              color = Palette.ink;
+                          }
+                        }
                         return Align(
                           // zarların üstüne binmesin: zarlar aşağıdaysa yukarıda, yukarıdaysa aşağıda
                           alignment: Alignment(0, verdictAbove ? -0.32 : 0.3),
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            padding: const EdgeInsets.symmetric(horizontal: 28),
                             child: Column(mainAxisSize: MainAxisSize.min, children: [
+                              Text(kicker.toUpperCase(), textAlign: TextAlign.center, style: _label.copyWith(shadows: _glow)),
+                              const SizedBox(height: 6),
                               Text(title,
                                   textAlign: TextAlign.center,
-                                  style: TextStyle(fontFamily: Palette.display, fontSize: 36, color: color, shadows: glow)),
-                              const SizedBox(height: 4),
-                              Text(sub,
+                                  style: TextStyle(fontFamily: Palette.display, fontSize: 38, color: color, shadows: _glow)),
+                              const SizedBox(height: 6),
+                              Text(detail,
                                   textAlign: TextAlign.center,
-                                  style: const TextStyle(color: Palette.ink, fontSize: 16, shadows: glow)),
+                                  style: const TextStyle(
+                                      color: Color(0xCCE9E1CE),
+                                      fontSize: 15,
+                                      fontFeatures: [FontFeature.tabularFigures()],
+                                      shadows: _glow)),
+                              const SizedBox(height: 10),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: const Color(0x8C000000),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: color.withValues(alpha: 0.45)),
+                                ),
+                                child: Text(result,
+                                    style: TextStyle(color: color, fontSize: 14, fontWeight: FontWeight.w600)),
+                              ),
                             ]),
                           ),
                         );
@@ -2207,28 +2275,61 @@ jobs:
             /// Üstte sürekli duran şerit: son atışı kim attı, ne geldi, ne oldu.
             Widget _lastThrow() {
               final r = shown!;
-              final (String what, Color color) = fell > 0
-                  ? ('zar düştü, sayılmaz', const Color(0xFFF2D58A))
-                  : switch (r.out) {
-                      Outcome.first => ('hedef ${r.sum}', const Color(0xFFF2D58A)),
-                      Outcome.win => ('${r.sum} · geçti +${r.amount}', Palette.win),
-                      Outcome.lose => ('${r.sum} · geçemedi −${r.amount}', Palette.lose),
-                      Outcome.tie => ('${r.sum} · berabere', const Color(0xB3E9E1CE)),
-                    };
+              final (tag, color) = _outcomeTag(r);
               return Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(color: const Color(0x8C000000), borderRadius: BorderRadius.circular(16)),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  const Text('Son atış', style: TextStyle(color: Color(0x99E9E1CE), fontSize: 13)),
+                padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+                decoration: BoxDecoration(color: const Color(0x80000000), borderRadius: BorderRadius.circular(12)),
+                child: Row(children: [
+                  const Text('SON ATIŞ', style: _label),
                   const SizedBox(width: 10),
                   if (fell == 0) ...[
-                    DieFace(value: r.d1, size: 20, shadow: false),
+                    DieFace(value: r.d1, size: 18, shadow: false),
                     const SizedBox(width: 3),
-                    DieFace(value: r.d2, size: 20, shadow: false),
-                    const SizedBox(width: 10),
+                    DieFace(value: r.d2, size: 18, shadow: false),
+                    const SizedBox(width: 8),
                   ],
-                  Text('${r.by + 1}. oyuncu · ', style: const TextStyle(color: Palette.ink, fontSize: 13)),
-                  Text(what, style: TextStyle(color: color, fontSize: 13, fontWeight: FontWeight.w700)),
+                  Expanded(
+                    child: Text('${_name(r.by)}${fell == 0 ? '  ·  ${r.sum}' : ''}',
+                        overflow: TextOverflow.ellipsis, style: const TextStyle(color: Palette.ink, fontSize: 13)),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(color: color.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(8)),
+                    child: Text(tag, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w700)),
+                  ),
+                ]),
+              );
+            }
+
+            /// Hedef paneli: hedef sayı ve ikinci atan için üç olasılık.
+            Widget _targetPanel(int t) {
+              Widget chip(String text, Color c) => Container(
+                    margin: const EdgeInsets.only(right: 6, bottom: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(color: c.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(8)),
+                    child: Text(text, style: TextStyle(color: c, fontSize: 12, fontWeight: FontWeight.w600)),
+                  );
+              return Container(
+                margin: const EdgeInsets.only(bottom: 14),
+                padding: const EdgeInsets.fromLTRB(14, 8, 10, 6),
+                decoration: BoxDecoration(
+                  color: const Color(0x99000000),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0x80D4B158)),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Column(mainAxisSize: MainAxisSize.min, children: [
+                    const Text('HEDEF', style: _label),
+                    Text('$t', style: const TextStyle(fontFamily: Palette.display, fontSize: 34, color: _goldSoft, height: 1.1)),
+                  ]),
+                  Container(width: 1, height: 44, color: const Color(0x33E9E1CE), margin: const EdgeInsets.symmetric(horizontal: 12)),
+                  Flexible(
+                    child: Wrap(children: [
+                      t < 12 ? chip('${t + 1}+ kazanır', Palette.win) : chip('Geçilemez', const Color(0xB3E9E1CE)),
+                      chip('$t berabere', const Color(0xB3E9E1CE)),
+                      if (t > 2) chip('${t - 1} ve altı kaybeder', Palette.lose),
+                    ]),
+                  ),
                 ]),
               );
             }
@@ -2238,72 +2339,56 @@ jobs:
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 40),
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    Text('${(game.winner ?? 0) + 1}. oyuncu masayı kazandı',
-                        style: const TextStyle(color: Palette.ink, fontSize: 18, shadows: [Shadow(color: Colors.black, blurRadius: 12)])),
-                    const SizedBox(height: 12),
+                    const Text('OYUN BİTTİ', style: _label),
+                    const SizedBox(height: 4),
+                    Text('${_name(game.winner ?? 0)} kazandı',
+                        style: const TextStyle(fontFamily: Palette.display, fontSize: 30, color: _goldSoft, shadows: _glow)),
+                    const SizedBox(height: 14),
                     FilledButton(
                       onPressed: _newGame,
                       style: FilledButton.styleFrom(
                           backgroundColor: Palette.gold, foregroundColor: Palette.bg, shape: const StadiumBorder()),
                       child: const Padding(
                         padding: EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                        child: Text('Yeniden oyna', style: TextStyle(fontFamily: Palette.display, fontSize: 20)),
+                        child: Text('Yeni oyun', style: TextStyle(fontFamily: Palette.display, fontSize: 20)),
                       ),
                     ),
                   ]),
                 );
               }
               final throwing = phase == Phase.released || phase == Phase.flying;
-              final turn = throwing ? '${game.turn + 1}. oyuncu atıyor' : 'Sıra ${game.turn + 1}. oyuncuda';
-              final vessel = cup.palm ? 'Zarlar avucunda' : 'Zarlar fincanda';
               final target = game.target;
               final String hint;
-              if (target != null) {
-                // ikinci atan neyi atarsa ne olacağını her an görsün
-                hint = targetHint(target);
-              } else if (phase != Phase.holding) {
+              if (phase != Phase.holding) {
                 hint = '';
               } else if (!sensorsOk) {
-                hint = 'Atmak için ekranda aşağıdan yukarı kaydır.';
+                hint = 'Atmak için ekranı aşağıdan yukarı kaydır.';
               } else if (throws < 2) {
-                hint = '$vessel. Telefonu düz ya da ucu hafif yukarıda tutup istediğin kadar salla; '
-                    'ucu yatayı aşağı doğru geçtiği an zarlar dökülür.';
+                hint = 'Telefonu salla, ucunu aşağı eğerek zarları dök.';
               } else {
-                hint = vessel;
+                hint = '';
               }
-              const shadow = [Shadow(color: Colors.black, blurRadius: 10)];
               return IgnorePointer(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(32, 0, 32, 36),
+                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 30),
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    if (target != null)
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: const Color(0x8C000000),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: const Color(0x80D4B158)),
-                        ),
-                        child: Text('Hedef $target',
-                            style: const TextStyle(fontFamily: Palette.display, fontSize: 22, color: Color(0xFFF2D58A))),
-                      ),
+                    if (target != null) _targetPanel(target),
+                    Text(throwing ? 'ATIŞ YAPILIYOR' : 'SIRADA', style: _label.copyWith(shadows: _glow)),
+                    const SizedBox(height: 2),
                     Text(
-                      turn,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontFamily: Palette.display, fontSize: 26, color: Palette.gold, shadows: shadow),
+                      _name(game.turn),
+                      style: const TextStyle(fontFamily: Palette.display, fontSize: 28, color: Palette.gold, shadows: _glow),
                     ),
-                    AnimatedOpacity(
-                      opacity: hint.isEmpty ? 0 : 0.85,
-                      duration: const Duration(milliseconds: 300),
-                      child: Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Text(
-                          hint.isEmpty ? ' ' : hint,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: Palette.ink, fontSize: 14, height: 1.4, shadows: shadow),
-                        ),
-                      ),
+                    AnimatedSize(
+                      duration: const Duration(milliseconds: 250),
+                      child: hint.isEmpty
+                          ? const SizedBox.shrink()
+                          : Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Text(hint,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(color: Color(0xB3E9E1CE), fontSize: 13, shadows: _glow)),
+                            ),
                     ),
                   ]),
                 ),
