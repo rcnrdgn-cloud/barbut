@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 16: eğlenceli kazanma/kaybetme sesleri): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 17: ışıklı yuvarlak kenarlar, oyuk benekler, zıplayan zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -1159,8 +1159,9 @@ jobs:
                   if (d.z <= 0) {
                     d.z = 0;
                     final impact = -d.vz;
-                    final hard = impact > s * 2.5;
-                    d.vz = hard ? impact * 0.4 : 0.0;
+                    final hard = impact > s * 1.8;
+                    // gerçek zar sert masada birkaç kez seker; her sekişte yüksekliğin yaklaşık dörtte biri kalır
+                    d.vz = hard ? impact * 0.5 : 0.0;
                     final keep = hard ? 0.82 : 0.93; // sert düşüşte çok, küçük sekmede az enerji kaybı
                     d.vx *= keep;
                     d.vy *= keep;
@@ -1296,6 +1297,7 @@ jobs:
           cat > lib/table_view.dart <<'BARBUT_EOF'
           import 'dart:math';
           import 'dart:typed_data';
+          import 'dart:ui' as ui;
 
           import 'package:flutter/material.dart';
 
@@ -1455,107 +1457,186 @@ jobs:
                 canvas.saveLayer(null, Paint()..color = Color.fromRGBO(0, 0, 0, a));
               }
               final cam = [size.width / 2, size.height / 2, max(size.width, size.height) * 5.0];
-
-              final faces = <_Face>[];
-              for (var f = 1; f <= 6; f++) {
-                final n = faceNormal(d.rot, f);
-                // yüz merkezi ekranda; normal ekran koordinatında (y aşağı)
-                final c = [d.x + n[0] * s / 2, d.y - n[1] * s / 2, hz + n[2] * s / 2];
-                final view = n[0] * (cam[0] - c[0]) - n[1] * (cam[1] - c[1]) + n[2] * (cam[2] - c[2]);
-                if (view <= 0) continue;
-                final loc = [0.0, 0.0, 0.0], u = [0.0, 0.0, 0.0], v = [0.0, 0.0, 0.0];
-                loc[_faceAxisOf(f)] = _faceSignOf(f) * 0.5;
-                u[_uAxis[f]] = 1;
-                v[_vAxis[f]] = 1;
-                Offset at(double a, double b) => _proj(
-                    _world(d, s, hz, loc[0] + (a - 0.5) * u[0] + (b - 0.5) * v[0], loc[1] + (a - 0.5) * u[1] + (b - 0.5) * v[1],
-                        loc[2] + (a - 0.5) * u[2] + (b - 0.5) * v[2]),
-                    size);
-                final lit = (n[0] * _lx + n[1] * _ly + n[2] * _lz).clamp(0.0, 1.0);
-                faces.add(_Face(f, at(0, 0), at(1, 0), at(0, 1), at(1, 1), 0.42 + 0.58 * lit, view));
-              }
-              faces.sort((a, b) => a.view.compareTo(b.view));
-
-              if (faces.isEmpty) {
-                if (dropping) canvas.restore();
-                return;
+              final r = d.rot;
+              List<double> toWorld(double x, double y, double z) =>
+                  [r[0] * x + r[1] * y + r[2] * z, r[3] * x + r[4] * y + r[5] * z, r[6] * x + r[7] * y + r[8] * z];
+              Offset at(double x, double y, double z) => _proj(_world(d, s, hz, x, y, z), size);
+              // bir yüzeyin kameraya dönük olup olmadığı (n: dünya normali, p: yerel nokta)
+              double facing(List<double> n, double x, double y, double z) {
+                final w = _world(d, s, hz, x, y, z);
+                return n[0] * (cam[0] - w[0]) - n[1] * (cam[1] - w[1]) + n[2] * (cam[2] - w[2]);
               }
 
-              // 1) gövde: köşeleri ve kenarları yuvarlatılmış küp. İçteki küçük küpün
-              //    görüntüsü, yuvarlaklık yarıçapı kadar yuvarlak uçlu kalemle şişirilir:
-              //    çıkan şekil tam olarak kenarları yuvarlak bir küpün dış hatlarıdır.
+              // zıplama: zar masadan yükseldikçe göze yaklaşır, belirgin biçimde büyür
+              final center = at(0, 0, 0);
+              final lift = max(0.0, d.z);
+              final grow = 1 + lift / (s * 3.2);
+              canvas.save();
+              canvas.translate(center.dx, center.dy);
+              canvas.scale(grow);
+              canvas.translate(-center.dx, -center.dy);
+
               const k = 0.5 - _round;
+
+              // 1) gövde: yuvarlak kenarlı küpün dış hattı (en dıştaki, ışığı sıyıran kısım)
               final inner = <Offset>[];
-              for (final lx in const [-k, k]) {
-                for (final ly in const [-k, k]) {
-                  for (final lz in const [-k, k]) {
-                    inner.add(_proj(_world(d, s, hz, lx, ly, lz), size));
+              for (final x in const [-k, k]) {
+                for (final y in const [-k, k]) {
+                  for (final z in const [-k, k]) {
+                    inner.add(at(x, y, z));
                   }
                 }
               }
               final body = Path()..addPolygon(_hull(inner), true);
-              final meanLight = faces.map((f) => f.light).reduce((a, b) => a + b) / faces.length;
-              final edge = Color.lerp(const Color(0xFF9A8A6E), Palette.boneShade, meanLight)!;
-              canvas.drawPath(body, Paint()..color = edge);
+              final rim = Paint()..color = _shade(toWorld(0, 0, 1), rim: true);
+              canvas.drawPath(body, rim);
               canvas.drawPath(
                 body,
                 Paint()
-                  ..color = edge
+                  ..color = rim.color
                   ..style = PaintingStyle.stroke
                   ..strokeWidth = 2 * _round * s
                   ..strokeJoin = StrokeJoin.round,
               );
-              // 2) düz yüzler: yuvarlak kenardan yüzün düzlüğüne yumuşak geçiş, üstünde benekler
-              for (final fc in faces) {
+
+              // 2) köşeler: küçük küre parçaları
+              for (final x in const [-1.0, 1.0]) {
+                for (final y in const [-1.0, 1.0]) {
+                  for (final z in const [-1.0, 1.0]) {
+                    const q = 0.57735;
+                    final n = toWorld(x * q, y * q, z * q);
+                    if (facing(n, x * k, y * k, z * k) <= 0) continue;
+                    // köşe rengi: komşu üç yüzün ortası, böylece kenar bantlarıyla dikişsiz birleşir
+                    final c1 = _shade(toWorld(x, 0, 0)), c2 = _shade(toWorld(0, y, 0)), c3 = _shade(toWorld(0, 0, z));
+                    final cc = Color.fromARGB(255, ((c1.red + c2.red + c3.red) / 3).round(),
+                        ((c1.green + c2.green + c3.green) / 3).round(), ((c1.blue + c2.blue + c3.blue) / 3).round());
+                    canvas.drawCircle(at(x * k, y * k, z * k), _round * s, Paint()..color = cc);
+                  }
+                }
+              }
+
+              // 3) yuvarlak kenarlar: iki yüz arasında ışığı kıvrılarak taşıyan silindir bantlar
+              for (var a = 0; a < 3; a++) {
+                for (var b = a + 1; b < 3; b++) {
+                  final c = 3 - a - b;
+                  for (final sa in const [-1.0, 1.0]) {
+                    for (final sb in const [-1.0, 1.0]) {
+                      List<double> p(int axis1, double v1, int axis2, double v2, double t) {
+                        final l = [0.0, 0.0, 0.0];
+                        l[axis1] = v1;
+                        l[axis2] = v2;
+                        l[c] = t;
+                        return l;
+                      }
+
+                      final na = [0.0, 0.0, 0.0]..[a] = sa;
+                      final nb = [0.0, 0.0, 0.0]..[b] = sb;
+                      final nm = [0.0, 0.0, 0.0]
+                        ..[a] = sa * 0.7071
+                        ..[b] = sb * 0.7071;
+                      final wa = toWorld(na[0], na[1], na[2]), wb = toWorld(nb[0], nb[1], nb[2]);
+                      final wm = toWorld(nm[0], nm[1], nm[2]);
+                      final mid = p(a, sa * (k + _round * 0.7071), b, sb * (k + _round * 0.7071), 0);
+                      if (facing(wm, mid[0], mid[1], mid[2]) <= 0) continue;
+                      final a0 = p(a, sa * 0.5, b, sb * k, -k), a1 = p(a, sa * 0.5, b, sb * k, k);
+                      final b0 = p(a, sa * k, b, sb * 0.5, -k), b1 = p(a, sa * k, b, sb * 0.5, k);
+                      final pa0 = at(a0[0], a0[1], a0[2]), pa1 = at(a1[0], a1[1], a1[2]);
+                      final pb0 = at(b0[0], b0[1], b0[2]), pb1 = at(b1[0], b1[1], b1[2]);
+                      final ga = Offset((pa0.dx + pa1.dx) / 2, (pa0.dy + pa1.dy) / 2);
+                      final gb = Offset((pb0.dx + pb1.dx) / 2, (pb0.dy + pb1.dy) / 2);
+                      if ((ga - gb).distanceSquared < 0.01) continue;
+                      final band = Path()..addPolygon([pa0, pa1, pb1, pb0], true);
+                      canvas.drawPath(
+                        band,
+                        Paint()
+                          ..isAntiAlias = true
+                          ..shader = ui.Gradient.linear(ga, gb, [_shade(wa), _shade(wm), _shade(wb)], const [0.0, 0.5, 1.0]),
+                      );
+                    }
+                  }
+                }
+              }
+
+              // 4) düz yüzler ve oyuk benekler
+              for (var f = 1; f <= 6; f++) {
+                final n = faceNormal(d.rot, f);
+                final loc = [0.0, 0.0, 0.0], u = [0.0, 0.0, 0.0], v = [0.0, 0.0, 0.0];
+                loc[_faceAxisOf(f)] = _faceSignOf(f) * 0.5;
+                if (facing(n, loc[0], loc[1], loc[2]) <= 0) continue;
+                u[_uAxis[f]] = 1;
+                v[_vAxis[f]] = 1;
+                Offset fp(double pa, double pb) => at(loc[0] + (pa - 0.5) * u[0] + (pb - 0.5) * v[0],
+                    loc[1] + (pa - 0.5) * u[1] + (pb - 0.5) * v[1], loc[2] + (pa - 0.5) * u[2] + (pb - 0.5) * v[2]);
+                final p00 = fp(0, 0), p10 = fp(1, 0), p01 = fp(0, 1);
+                final ea = p10 - p00, eb = p01 - p00;
+                final area = (ea.dx * eb.dy - ea.dy * eb.dx).abs() / (s * s);
+                if (area < 0.03) continue; // neredeyse tam yandan: görünmez
+                // ışığın yüz üzerindeki yönü (yüzün kendi eksenlerinde)
+                final uw = toWorld(u[0], u[1], u[2]), vw = toWorld(v[0], v[1], v[2]);
+                final lu = uw[0] * _lx + uw[1] * _ly + uw[2] * _lz;
+                final lv = vw[0] * _lx + vw[1] * _ly + vw[2] * _lz;
                 canvas.save();
-                final a = fc.p10 - fc.p00, b = fc.p01 - fc.p00;
-                canvas.transform(Float64List.fromList([a.dx, a.dy, 0, 0, b.dx, b.dy, 0, 0, 0, 0, 1, 0, fc.p00.dx, fc.p00.dy, 0, 1]));
-                _paintFace(canvas, fc.face, fc.light, edge);
+                canvas.transform(Float64List.fromList([ea.dx, ea.dy, 0, 0, eb.dx, eb.dy, 0, 0, 0, 0, 1, 0, p00.dx, p00.dy, 0, 1]));
+                _paintFace(canvas, f, _shade(n), lu, lv, pips: area > 0.12);
                 canvas.restore();
               }
+              canvas.restore();
               if (dropping) canvas.restore();
             }
 
             static int _faceAxisOf(int f) => const [0, 2, 0, 1, 1, 0, 2][f];
             static double _faceSignOf(int f) => const [0.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0][f];
 
-            /// Birim karede (0..1) bir yüz.
-            void _paintFace(Canvas canvas, int value, double light, Color edge) {
-              final base = Color.lerp(const Color(0xFF9C8C70), Palette.bone, light)!;
-              final hi = Color.lerp(const Color(0xFFAE9E82), Palette.boneLight, light)!;
-              // yuvarlak kenar bandı: dıştan içe, kenar renginden yüz rengine 5 adımda
-              const steps = 5;
-              for (var i = 1; i < steps; i++) {
-                final t = i / steps;
-                final ins = _round * t;
-                final band = RRect.fromRectAndRadius(
-                  Rect.fromLTWH(ins, ins, 1 - 2 * ins, 1 - 2 * ins),
-                  Radius.circular(_round * (1.05 - 0.5 * t)),
-                );
-                canvas.drawRRect(band, Paint()..color = Color.lerp(edge, base, t * t * (3 - 2 * t))!);
-              }
+            // fildişi zar: gölgedeki ve ışıktaki renkleri
+            static const _ivoryDark = Color(0xFF6B5D47);
+            static const _ivory = Color(0xFFF3EBD8);
+
+            /// Dünya normaline göre yüzey rengi: yaygın ışık + parlak (cilalı) yansıma.
+            Color _shade(List<double> n, {bool rim = false, bool gloss = true}) {
+              final len = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+              final nx = n[0] / len, ny = n[1] / len, nz = n[2] / len;
+              final diff = max(0.0, nx * _lx + ny * _ly + nz * _lz);
+              // yarı vektör: ışık ile yukarıdaki göz arasında
+              const hx = -0.38 / 1.8, hy = 0.46 / 1.8, hz = 1.8 / 1.8;
+              final hl = sqrt(hx * hx + hy * hy + hz * hz);
+              final spec = pow(max(0.0, (nx * hx + ny * hy + nz * hz) / hl), 36).toDouble();
+              var c = Color.lerp(_ivoryDark, _ivory, (rim ? 0.25 : 0.38) + 0.62 * diff)!;
+              if (!rim && gloss) c = Color.lerp(c, const Color(0xFFFFFFFF), (spec * 0.55).clamp(0.0, 1.0))!;
+              return c;
+            }
+
+            /// Birim karede (0..1) bir yüzün düz kısmı ve oyuk benekleri.
+            /// [lu], [lv]: ışığın bu yüz üzerindeki yönü.
+            void _paintFace(Canvas canvas, int value, Color base, double lu, double lv, {bool pips = true}) {
               const rect = Rect.fromLTWH(_round, _round, 1 - 2 * _round, 1 - 2 * _round);
-              final rr = RRect.fromRectAndRadius(rect, const Radius.circular(_round * 0.5));
+              final rr = RRect.fromRectAndRadius(rect, const Radius.circular(0.02));
+              final hi = Color.lerp(base, const Color(0xFFFFFFFF), 0.07)!;
+              final lo = Color.lerp(base, const Color(0xFF000000), 0.05)!;
               canvas.drawRRect(
                 rr,
                 Paint()
                   ..shader = LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [hi, base],
+                    begin: Alignment(lu.clamp(-1.0, 1.0), lv.clamp(-1.0, 1.0)),
+                    end: Alignment(-lu.clamp(-1.0, 1.0), -lv.clamp(-1.0, 1.0)),
+                    colors: [hi, lo],
                   ).createShader(rect),
               );
+              if (!pips) return; // çok yandan bakılan yüzde benekler çizgiye dönüşür, çizme
               final red = value == 1 || value == 4;
-              final r = value == 1 ? 0.115 : 0.085;
-              const f = [0.26, 0.5, 0.74];
-              final pipColor = Color.lerp(Colors.black, red ? Palette.pipRed : Palette.pip, 0.55 + 0.45 * light)!;
-              final rim = Paint()..color = Color.fromRGBO(255, 255, 255, 0.18 * light);
-              final pip = Paint()..color = pipColor;
+              final pr = value == 1 ? 0.12 : 0.085;
+              const g = [0.27, 0.5, 0.73];
+              final floor = red ? const Color(0xFF7E1020) : const Color(0xFF15110C);
+              final wall = Color.lerp(floor, base, red ? 0.45 : 0.4)!;
+              // oyuk: ışığa yakın kenarı gölgede, uzak duvarı aydınlık
+              final shift = Offset(lu, lv) * (pr * 0.3);
               for (final i in _pips[value] ?? const <int>[]) {
-                final c = Offset(f[i % 3], f[i ~/ 3]);
-                // oyuk benek: alt-sağ kenarında ince ışık, içi koyu
-                canvas.drawCircle(c + const Offset(0.008, 0.01), r, rim);
-                canvas.drawCircle(c, r, pip);
+                final c = Offset(g[i % 3], g[i ~/ 3]);
+                final hole = Path()..addOval(Rect.fromCircle(center: c, radius: pr));
+                canvas.drawPath(hole, Paint()..color = wall);
+                canvas.save();
+                canvas.clipPath(hole);
+                canvas.drawCircle(c + shift, pr * 0.97, Paint()..color = floor);
+                canvas.restore();
               }
             }
 
@@ -1563,12 +1644,6 @@ jobs:
             bool shouldRepaint(covariant DicePainter old) => true;
           }
 
-          class _Face {
-            _Face(this.face, this.p00, this.p10, this.p01, this.p11, this.light, this.view);
-            final int face;
-            final Offset p00, p10, p01, p11;
-            final double light, view;
-          }
 
           /// Kahvehane masası: koyu ceviz, damarlar, kenar pervazı.
           class WoodTablePainter extends CustomPainter {
