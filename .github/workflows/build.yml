@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 18: tepeden bakış, sallama şiddetine göre zıplama): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 19: zıplarken gerçekçi boyut): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -1463,10 +1463,12 @@ jobs:
               // tepeden bakışta yukarı (Z) bakan yüzey görünür
               double facing(List<double> n, double x, double y, double z) => n[2] - 1e-4;
 
-              // zıplama: zar masadan yükseldikçe göze yaklaşır, belirgin biçimde büyür
+              // zıplama: zar yükseldikçe göze biraz yaklaşır. Gerçekte masaya ~40 cm'den bakılır,
+              // birkaç cm zıplayan zar en fazla %10 kadar büyük görünür; yüksekliği asıl gölgesinin
+              // zardan ayrılması belli eder.
               final center = at(0, 0, 0);
               final lift = max(0.0, d.z);
-              final grow = 1 + lift / (s * 3.2);
+              final grow = min(1.10, 1 + lift / (s * 16));
               canvas.save();
               canvas.translate(center.dx, center.dy);
               canvas.scale(grow);
