@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 17: ışıklı yuvarlak kenarlar, oyuk benekler, zıplayan zarlar): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 18: tepeden bakış, sallama şiddetine göre zıplama): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -1002,7 +1002,8 @@ jobs:
                 d.vx = speed * sin(ang);
                 d.vy = -speed * cos(ang);
                 d.z = s * 0.9;
-                d.vz = s * (7 + 4 * st) * (0.85 + 0.3 * _rng.nextDouble());
+                // sallama ne kadar sertse zarlar o kadar yükseğe fırlar (yükseklik hızın karesiyle artar)
+                d.vz = s * (3 + 9 * strength) * (0.9 + 0.2 * _rng.nextDouble());
                 d.spin = 14 + 12 * _rng.nextDouble();
                 _airAxis(d, 0.6);
                 d.heading = atan2(d.vy, d.vx);
@@ -1388,12 +1389,10 @@ jobs:
               return [d.x + wx * s, d.y - wy * s, hz + wz * s];
             }
 
-            Offset _proj(List<double> p, Size size) {
-              final cx = size.width / 2, cy = size.height / 2;
-              final hc = max(size.width, size.height) * 5.0; // göz yüksekliği: yüksekten, hafif perspektif
-              final f = hc / max(hc - p[2], 1.0);
-              return Offset(cx + (p[0] - cx) * f, cy + (p[1] - cy) * f);
-            }
+            /// Tam tepeden bakış: masada düz duran zarın yalnızca üst yüzü ve dört bir yanındaki
+            /// yuvarlak kenarı görünür, ekranın neresinde olursa olsun yan yüzü "sızmaz".
+            /// (Yükseklik hissini zıplarken büyüme ve gölge verir.)
+            Offset _proj(List<double> p, Size size) => Offset(p[0], p[1]);
 
             void _shadow(Canvas canvas, TableDie d, double s) {
               final hz = d.centerZ(s);
@@ -1456,16 +1455,13 @@ jobs:
                 final a = (1 + d.z / (s * 3)).clamp(0.0, 1.0);
                 canvas.saveLayer(null, Paint()..color = Color.fromRGBO(0, 0, 0, a));
               }
-              final cam = [size.width / 2, size.height / 2, max(size.width, size.height) * 5.0];
               final r = d.rot;
               List<double> toWorld(double x, double y, double z) =>
                   [r[0] * x + r[1] * y + r[2] * z, r[3] * x + r[4] * y + r[5] * z, r[6] * x + r[7] * y + r[8] * z];
               Offset at(double x, double y, double z) => _proj(_world(d, s, hz, x, y, z), size);
               // bir yüzeyin kameraya dönük olup olmadığı (n: dünya normali, p: yerel nokta)
-              double facing(List<double> n, double x, double y, double z) {
-                final w = _world(d, s, hz, x, y, z);
-                return n[0] * (cam[0] - w[0]) - n[1] * (cam[1] - w[1]) + n[2] * (cam[2] - w[2]);
-              }
+              // tepeden bakışta yukarı (Z) bakan yüzey görünür
+              double facing(List<double> n, double x, double y, double z) => n[2] - 1e-4;
 
               // zıplama: zar masadan yükseldikçe göze yaklaşır, belirgin biçimde büyür
               final center = at(0, 0, 0);
@@ -1837,6 +1833,7 @@ jobs:
                     final mag = sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
                     final dev = (mag - 9.81).abs();
                     if (dev > 6) _lastJolt = DateTime.now(); // sallanıyor
+                    _shakeEnergy = max(dev, _shakeEnergy * 0.985);
                     if (!_gyroOk) {
                       // jiroskop yoksa: ivmeölçerden hızlıca
                       _gx += (e.x - _gx) * 0.3;
@@ -1924,7 +1921,9 @@ jobs:
 
             /* ---------------- atış ---------------- */
 
-            double get _shakeStrength => (0.7 + cup.hardHits * 0.04).clamp(0.7, 1.3);
+            // sallamanın şiddeti: son sallamaların en serti (yavaşça söner). 0.6 hafif … 1.4 çok sert
+            double _shakeEnergy = 0;
+            double get _shakeStrength => 0.6 + 0.8 * (_shakeEnergy / 25).clamp(0.0, 1.0);
 
             /// Telefonun ucu masaya doğru çevrildi: zarlar fincandan döküldü.
             /// Masaya düşüşleri, ekran tekrar sana dönünce (ya da en geç 1,2 sn sonra) başlar.
@@ -1932,6 +1931,7 @@ jobs:
               if (phase != Phase.holding || game.over || table == null) return;
               // hızlı devirmek de, çok sallamak da atışı güçlendirir
               _releaseStrength = max(_shakeStrength, (0.6 + _tiltRate * 0.1).clamp(0.6, 1.3));
+              _shakeEnergy = 0;
               _releasedAt = DateTime.now();
               ImpactFeel.I.release(_releaseStrength);
               setState(() {
