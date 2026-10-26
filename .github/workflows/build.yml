@@ -3500,7 +3500,98 @@ jobs:
           BARBUT_EOF
           ls -R lib test
 
-      - name: Sesleri üret
+            - name: Tavla adları (sürüm 20)
+        working-directory: barbut_app
+        run: |
+          python3 - <<'PATCH_EOF'
+          import sys
+
+          def edit(path, pairs):
+              s = open(path, encoding='utf-8').read()
+              for old, new in pairs:
+                  if s.count(old) != 1:
+                      sys.exit(f'YAMA BULUNAMADI: {path}: {old[:70]!r}')
+                  s = s.replace(old, new)
+              open(path, 'w', encoding='utf-8').write(s)
+
+          edit('lib/game.dart', [(
+              "/// Hedefe göre ikinci atanın bilmesi gerekenler, kısa cümlelerle.",
+              r'''/// Tavlada kullanılan Farsça sayı adları.
+          const _fa = {1: 'yek', 2: 'dü', 3: 'se', 4: 'cihar', 5: 'penç', 6: 'şeş'};
+
+          /// Çiftlerin geleneksel adları.
+          const _doubles = {1: 'Hep yek', 2: 'Dubara', 3: 'Dü se', 4: 'Dört cihar', 5: 'Dü beş', 6: 'Düşeş'};
+
+          /// Atışın tavladaki adı ve rakamları: "Şeşbeş 6-5", "Dubara 2-2", "Cihar se 4-3".
+          String rollName(int a, int b) {
+            final hi = max(a, b), lo = min(a, b);
+            final String name;
+            if (hi == lo) {
+              name = _doubles[hi]!;
+            } else if (hi == 6 && lo == 5) {
+              name = 'Şeşbeş';
+            } else {
+              final w = '${_fa[hi]} ${_fa[lo]}';
+              name = w[0].toUpperCase() + w.substring(1);
+            }
+            return '$name $hi-$lo';
+          }
+
+          /// Hedefe göre ikinci atanın bilmesi gerekenler, kısa cümlelerle.'''),
+          ])
+
+          edit('lib/hand_screen.dart', [
+              # ilk atışın büyük yazısı: "Hedef 8" yerine "Penç se 5-3"
+              ("'Hedef ${r.sum}',", "rollName(r.d1, r.d2),"),
+              ("'$who $dice attı · şimdi ${2 - r.by}. oyuncu geçmeye çalışacak',",
+               "'$who ${r.sum} attı · şimdi ${2 - r.by}. oyuncu ${r.sum} sayısını geçmeye çalışacak',"),
+              # ikinci atışta sonucun üstünde altın renkli atış adı
+              ("Text(title,\n",
+               "if (fell == 0 && r.out != Outcome.first)\n"
+               "  Text(rollName(r.d1, r.d2), textAlign: TextAlign.center, style: const TextStyle("
+               "fontFamily: Palette.display, fontSize: 24, color: Palette.gold, shadows: glow)),\n"
+               "Text(title,\n"),
+              # üstteki "Son atış" şeridi
+              ("('hedef ${r.sum}',", "(rollName(r.d1, r.d2),"),
+              ("('${r.sum} · geçti +${r.amount}',", "('${rollName(r.d1, r.d2)} · geçti +${r.amount}',"),
+              ("('${r.sum} · geçemedi −${r.amount}',", "('${rollName(r.d1, r.d2)} · geçemedi −${r.amount}',"),
+              ("('${r.sum} · berabere',", "('${rollName(r.d1, r.d2)} · berabere',"),
+              # alttaki rozet: "Hedef 8" yerine "Penç se 5-3 · 8"
+              ("Text('Hedef $target',",
+               "Text(game.log.isEmpty ? 'Hedef $target' : "
+               "'${rollName(game.log.first.d1, game.log.first.d2)} · $target',"),
+          ])
+
+          edit('lib/table_screen.dart', [
+              ("('Hedef ${r.sum}', '$who ${r.sum} attı · rakip geçmeye çalışacak', Palette.gold)",
+               "(rollName(r.d1, r.d2), '$who ${r.sum} attı · rakip ${r.sum} sayısını geçmeye çalışacak', Palette.gold)"),
+              ("Text(title, style: TextStyle(fontFamily: Palette.display, fontSize: 24, color: color)),",
+               "if (r.out != Outcome.first)\n"
+               "  Text(rollName(r.d1, r.d2), style: const TextStyle(fontFamily: Palette.display, fontSize: 18, color: Palette.gold)),\n"
+               "Text(title, style: TextStyle(fontFamily: Palette.display, fontSize: 24, color: color)),"),
+              ("Expanded(child: Text('${r.by + 1}. oyuncu', style: const TextStyle(color: Palette.ink))),",
+               "Expanded(child: Text('${r.by + 1}. oyuncu · ${rollName(r.d1, r.d2)}', style: const TextStyle(color: Palette.ink))),"),
+              ("Outcome.first => 'hedef ${r.sum}',", "Outcome.first => '= ${r.sum}',"),
+          ])
+
+          edit('test/widget_test.dart', [(
+              "test('ipucu metni', () {",
+              r'''test('tavla adları', () {
+              expect(rollName(6, 5), 'Şeşbeş 6-5');
+              expect(rollName(5, 6), 'Şeşbeş 6-5');
+              expect(rollName(6, 6), 'Düşeş 6-6');
+              expect(rollName(2, 2), 'Dubara 2-2');
+              expect(rollName(1, 1), 'Hep yek 1-1');
+              expect(rollName(4, 3), 'Cihar se 4-3');
+              expect(rollName(1, 6), 'Şeş yek 6-1');
+            });
+
+            test('ipucu metni', () {'''),
+          ])
+          print('Tavla adları eklendi')
+          PATCH_EOF
+
+       - name: Sesleri üret
         working-directory: barbut_app
         run: |
           pip install numpy scipy
