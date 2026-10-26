@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 19: zıplarken gerçekçi boyut): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 20: tavla adları): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -3500,7 +3500,7 @@ jobs:
           BARBUT_EOF
           ls -R lib test
 
-            - name: Tavla adları (sürüm 20)
+      - name: Tavla adları (sürüm 20)
         working-directory: barbut_app
         run: |
           python3 - <<'PATCH_EOF'
@@ -3591,7 +3591,7 @@ jobs:
           print('Tavla adları eklendi')
           PATCH_EOF
 
-       - name: Sesleri üret
+      - name: Sesleri üret
         working-directory: barbut_app
         run: |
           pip install numpy scipy
