@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 27: kaotik sert atış, kendiliğinden atış düzeltmesi): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 28: Tıkır ile Pırto): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -3912,6 +3912,374 @@ jobs:
               ("double get _friction => s * 9;", "double get _friction => s * (11 - 3 * _st);"),
           ])
           print('Kaotik sert atış ve kendiliğinden atış düzeltmesi uygulandı (sürüm 27)')
+          PATCH_EOF
+
+      - name: Tıkır ile Pırto (sürüm 28)
+        working-directory: barbut_app
+        run: |
+          python3 - <<'PATCH_EOF'
+          import sys
+
+          def edit(path, pairs):
+              s = open(path, encoding='utf-8').read()
+              for old, new in pairs:
+                  if s.count(old) != 1:
+                      sys.exit(f'YAMA BULUNAMADI: {path}: {old[:70]!r}')
+                  s = s.replace(old, new)
+              open(path, 'w', encoding='utf-8').write(s)
+
+          TOON_CLASS = r'''/// Tıkır ve Pırto: zarların çizgi film karakterleri. Ayarlardaki "Sade mod" kapatır.
+          class Toon {
+            static bool on = true;
+            static bool holding = false; // zarlar elde, masada değil
+            static double shake = 0; // 0 sakin … 1 çok sert sallama
+            static const names = ['Tıkır', 'Pırto'];
+          }
+
+          enum _Expr { normal, wide, scream, ouch, glare, dizzy, cool, shy, happy }
+
+          /// Kahvehane masası: koyu ceviz, damarlar, kenar pervazı.'''
+
+          TOON_METHODS = r'''double get _now => DateTime.now().millisecondsSinceEpoch / 1000.0;
+
+            /// Zarın üstüne karakter yüzü: masada dururken ekrana bakan yan yüzünde,
+            /// havada ve takla atarken zarın ortasında.
+            void _toon(Canvas canvas, TableDie d, int idx, double s, List<double> Function(double, double, double) toWorld,
+                Offset Function(double, double, double) at, Offset center, double grow) {
+              if (!Toon.on || idx < 0) return;
+              final t = _now;
+              final other = sim.dice[1 - idx];
+              final sp = sqrt(d.vx * d.vx + d.vy * d.vy);
+              final up = faceUp(d.rot);
+              final flat = faceNormal(d.rot, up)[2] > 0.85;
+              final airborne = d.z > s * 0.05;
+              _Expr e;
+              if (d.over) {
+                e = _Expr.scream;
+              } else if (d.settled) {
+                final bothDown = sim.dice.every((x) => x.settled && !x.fallen);
+                final doubles = bothDown && faceUp(other.rot) == up;
+                e = up == 6
+                    ? _Expr.cool
+                    : up == 1
+                        ? _Expr.shy
+                        : (doubles || up == 5)
+                            ? _Expr.happy
+                            : _Expr.normal;
+              } else if (d.squash > 0.35) {
+                e = _Expr.ouch;
+              } else if (d.glare > 0.3) {
+                e = _Expr.glare;
+              } else if (airborne && d.z > s * 1.2) {
+                e = _Expr.scream;
+              } else if (airborne && d.spin > 26) {
+                e = _Expr.dizzy;
+              } else if (airborne || sp > s * 6) {
+                e = _Expr.wide;
+              } else {
+                e = _Expr.normal;
+              }
+              var lx = 0.0, ly = 0.0;
+              if (e == _Expr.glare) {
+                final dx = other.x - d.x, dy = other.y - d.y, n = sqrt(dx * dx + dy * dy) + 1e-6;
+                lx = dx / n;
+                ly = dy / n;
+              } else if (!d.settled && sp > 1) {
+                lx = d.vx / sp;
+                ly = d.vy / sp;
+              } else if (e == _Expr.shy) {
+                ly = 0.8;
+              }
+              // düşeş: ikisi birden dans eder
+              final dance = d.settled && sim.dice.every((x) => x.settled && !x.fallen && faceUp(x.rot) == 6);
+
+              canvas.save();
+              canvas.translate(center.dx, center.dy);
+              canvas.scale(grow * (1 + 0.28 * d.squash), grow * (1 - 0.3 * d.squash));
+              if (dance) canvas.rotate(sin(t * 9 + idx * pi) * 0.18);
+              canvas.translate(-center.dx, -center.dy);
+
+              if (d.settled && flat && !d.over) {
+                // durunca yüz, ekrana bakan yan yüze geçer: üst yüzde benekler görünür
+                int? best;
+                var by = -0.4;
+                for (var f = 1; f <= 6; f++) {
+                  final n = faceNormal(d.rot, f);
+                  if (n[2].abs() < 0.35 && n[1] < by) {
+                    by = n[1];
+                    best = f;
+                  }
+                }
+                if (best != null) {
+                  final a = _faceAxisOf(best), sg = _faceSignOf(best);
+                  final corners = <List<double>>[];
+                  for (final u in const [-0.5, 0.5]) {
+                    for (final v in const [-0.5, 0.5]) {
+                      final l = [0.0, 0.0, 0.0];
+                      l[a] = sg * 0.5;
+                      l[(a + 1) % 3] = u;
+                      l[(a + 2) % 3] = v;
+                      corners.add(l);
+                    }
+                  }
+                  corners.sort((p, q) => toWorld(q[0], q[1], q[2])[2].compareTo(toWorld(p[0], p[1], p[2])[2]));
+                  var pA = at(corners[0][0], corners[0][1], corners[0][2]);
+                  var pB = at(corners[1][0], corners[1][1], corners[1][2]);
+                  if (pA.dx > pB.dx) {
+                    final tmp = pA;
+                    pA = pB;
+                    pB = tmp;
+                  }
+                  final h = s * 0.5;
+                  final down = Offset(0, h);
+                  final band = Path()..addPolygon([pA, pB, pB + down, pA + down], true);
+                  canvas.drawPath(band, Paint()..color = const Color(0xFFD9CDB2));
+                  canvas.drawPath(
+                      band,
+                      Paint()
+                        ..style = PaintingStyle.stroke
+                        ..strokeWidth = 1
+                        ..color = const Color(0x666B5D47));
+                  final w = (pB - pA).distance;
+                  final mid = (pA + pB) / 2 + Offset(0, h / 2);
+                  canvas.save();
+                  canvas.translate(mid.dx, mid.dy);
+                  canvas.rotate(atan2(pB.dy - pA.dy, pB.dx - pA.dx));
+                  _face(canvas, e, w, h, idx, lx, ly, t);
+                  canvas.restore();
+                  if (d.settled) {
+                    final tp = TextPainter(
+                      text: TextSpan(
+                        text: Toon.names[idx],
+                        style: const TextStyle(
+                            color: Color(0xFFF2D58A),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            shadows: [Shadow(color: Color(0xCC000000), blurRadius: 4)]),
+                      ),
+                      textDirection: TextDirection.ltr,
+                    )..layout();
+                    tp.paint(canvas, Offset(mid.dx - tp.width / 2, mid.dy + h / 2 + 4));
+                  }
+                }
+              } else {
+                // havada, takla atarken ve yuvarlanırken: yüz zarın ortasında
+                _face(canvas, e, s * 0.9, s * 0.9, idx, lx, ly, t, centerAt: center);
+              }
+              if (d.over) _bubble(canvas, center + Offset(0, -s), 'Kurtarın beniii!');
+              canvas.restore();
+            }
+
+            /// Karakter yüzü, (0,0) merkezli w×h kutuda. [lx], [ly]: bakış yönü (-1..1).
+            void _face(Canvas c, _Expr e, double w, double h, int idx, double lx, double ly, double t, {Offset? centerAt}) {
+              c.save();
+              if (centerAt != null) c.translate(centerAt.dx, centerAt.dy);
+              final ink = Paint()..color = const Color(0xFF15110C);
+              final line = Paint()
+                ..color = const Color(0xFF15110C)
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = max(1.2, w * 0.035)
+                ..strokeCap = StrokeCap.round;
+              final mouthRed = Paint()..color = const Color(0xFF7E1020);
+              final r = min(w * 0.15, h * 0.32);
+              final ey = -h * 0.12;
+              final mouthY = h * 0.3;
+              final blink = ((t + idx * 1.7) % 3.6) < 0.12 && (e == _Expr.normal || e == _Expr.happy);
+              final sleepy = idx == 1; // Pırto biraz uykucu
+              for (final sx in const [-1.0, 1.0]) {
+                final o = Offset(sx * w * 0.2, ey);
+                if (blink) {
+                  c.drawLine(o + Offset(-r * 0.8, 0), o + Offset(r * 0.8, 0), line);
+                  continue;
+                }
+                if (e == _Expr.ouch) {
+                  final xs = -sx; // sıkıca kapanmış gözler: > <
+                  c.drawLine(o + Offset(-r * 0.7 * xs, -r * 0.6), o + Offset(r * 0.6 * xs, 0), line);
+                  c.drawLine(o + Offset(r * 0.6 * xs, 0), o + Offset(-r * 0.7 * xs, r * 0.6), line);
+                  continue;
+                }
+                final rr = (e == _Expr.wide || e == _Expr.scream) ? r * 1.15 : r;
+                c.drawCircle(o, rr, Paint()..color = const Color(0xFFFFFFFF));
+                c.drawCircle(o, rr, line);
+                if (e == _Expr.dizzy) {
+                  final sp = Path();
+                  for (var k = 0; k <= 24; k++) {
+                    final a = k * 0.55 + t * 8 * sx;
+                    final rad = rr * 0.75 * k / 24;
+                    final pt = o + Offset(cos(a) * rad, sin(a) * rad);
+                    if (k == 0) {
+                      sp.moveTo(pt.dx, pt.dy);
+                    } else {
+                      sp.lineTo(pt.dx, pt.dy);
+                    }
+                  }
+                  c.drawPath(sp, line);
+                  continue;
+                }
+                var px = lx;
+                final py = ly;
+                if (e == _Expr.scream) px += sin(t * 40 + sx) * 0.3;
+                final pr = rr * (e == _Expr.scream ? 0.32 : 0.45);
+                c.drawCircle(o + Offset(px, py) * ((rr - pr) * 0.8), pr, ink);
+                final lidCover = e == _Expr.cool ? 1.0 : (sleepy && (e == _Expr.normal || e == _Expr.happy)) ? 0.75 : 0.0;
+                if (lidCover > 0) {
+                  c.save();
+                  c.clipPath(Path()..addOval(Rect.fromCircle(center: o, radius: rr)));
+                  c.drawRect(Rect.fromLTWH(o.dx - rr - 1, o.dy - rr - 1, rr * 2 + 2, rr * lidCover + 1),
+                      Paint()..color = const Color(0xFFE6DAC0));
+                  c.restore();
+                  final lidY = o.dy - rr + rr * lidCover;
+                  c.drawLine(Offset(o.dx - rr * 0.95, lidY), Offset(o.dx + rr * 0.95, lidY), line);
+                }
+                if (e == _Expr.glare) {
+                  c.drawLine(o + Offset(-rr * sx, -rr * 1.25), o + Offset(rr * 0.2 * sx, -rr * 0.75), line);
+                }
+              }
+              final mw = w * 0.22;
+              switch (e) {
+                case _Expr.scream:
+                case _Expr.ouch:
+                  c.drawOval(Rect.fromCenter(center: Offset(0, mouthY), width: mw * 0.9, height: h * 0.22), mouthRed);
+                case _Expr.wide:
+                  c.drawOval(Rect.fromCenter(center: Offset(0, mouthY), width: mw * 0.5, height: h * 0.12), mouthRed);
+                case _Expr.cool:
+                case _Expr.happy:
+                  {
+                    final p = Path()
+                      ..moveTo(-mw, mouthY - h * 0.05)
+                      ..quadraticBezierTo(0, mouthY + h * 0.22, mw, mouthY - h * 0.05)
+                      ..close();
+                    c.drawPath(p, mouthRed);
+                    c.drawPath(p, line);
+                  }
+                case _Expr.shy:
+                  {
+                    final p = Path()
+                      ..moveTo(-mw * 0.5, mouthY)
+                      ..quadraticBezierTo(-mw * 0.25, mouthY - h * 0.05, 0, mouthY)
+                      ..quadraticBezierTo(mw * 0.25, mouthY + h * 0.05, mw * 0.5, mouthY);
+                    c.drawPath(p, line);
+                    for (final sx in const [-1.0, 1.0]) {
+                      c.drawOval(Rect.fromCenter(center: Offset(sx * w * 0.36, mouthY - h * 0.08), width: w * 0.14, height: h * 0.1),
+                          Paint()..color = const Color(0x99F2A0A8));
+                    }
+                  }
+                case _Expr.glare:
+                  c.drawLine(Offset(-mw * 0.6, mouthY), Offset(mw * 0.6, mouthY), line);
+                case _Expr.dizzy:
+                  {
+                    final p = Path()..moveTo(-mw, mouthY);
+                    for (var i = 1; i <= 4; i++) {
+                      p.relativeQuadraticBezierTo(mw * 0.25, (i.isOdd ? -1 : 1) * h * 0.08, mw * 0.5, 0);
+                    }
+                    c.drawPath(p, line);
+                  }
+                case _Expr.normal:
+                  {
+                    final p = Path()
+                      ..moveTo(-mw * 0.6, mouthY)
+                      ..quadraticBezierTo(0, mouthY + h * 0.1, mw * 0.6, mouthY);
+                    c.drawPath(p, line);
+                  }
+              }
+              c.restore();
+            }
+
+            void _bubble(Canvas c, Offset at, String text) {
+              final tp = TextPainter(
+                text: TextSpan(
+                    text: text, style: const TextStyle(color: Color(0xFF15110C), fontSize: 13, fontWeight: FontWeight.w600)),
+                textDirection: TextDirection.ltr,
+              )..layout();
+              final r = Rect.fromCenter(center: at, width: tp.width + 16, height: tp.height + 10);
+              final rr = RRect.fromRectAndRadius(r, const Radius.circular(10));
+              c.drawRRect(rr, Paint()..color = const Color(0xFFFBF6EA));
+              c.drawRRect(
+                  rr,
+                  Paint()
+                    ..style = PaintingStyle.stroke
+                    ..strokeWidth = 1.5
+                    ..color = const Color(0xFF15110C));
+              tp.paint(c, Offset(r.left + 8, r.top + 5));
+            }
+
+            /// Zarlar eldeyken: ekranın altından masaya bakan Tıkır ile Pırto. Sallandıkça panik artar.
+            void _peek(Canvas canvas, Size size) {
+              final s = sim.s;
+              final y = size.height - sim.bottomInset;
+              final t = _now;
+              final p = Toon.shake;
+              canvas.save();
+              canvas.clipRect(Rect.fromLTWH(0, 0, size.width, y + s * 0.6));
+              for (var i = 0; i < 2; i++) {
+                final jx = p > 0.15 ? sin(t * (20 + 9 * i)) * p * s * 0.08 : 0.0;
+                final jy = p > 0.15 ? cos(t * (23 + 7 * i)) * p * s * 0.06 : 0.0;
+                final c = Offset(size.width * (i == 0 ? 0.36 : 0.64) + jx, y + s * 0.15 + jy);
+                final body = RRect.fromRectAndRadius(
+                    Rect.fromCenter(center: c + Offset(0, s * 0.35), width: s, height: s), Radius.circular(s * 0.16));
+                canvas.drawRRect(body, Paint()..color = const Color(0xFFF3EBD8));
+                canvas.drawRRect(
+                    body,
+                    Paint()
+                      ..style = PaintingStyle.stroke
+                      ..strokeWidth = 1.2
+                      ..color = const Color(0xFF6B5D47));
+                final e = p > 0.75
+                    ? _Expr.dizzy
+                    : p > 0.35
+                        ? _Expr.scream
+                        : p > 0.12
+                            ? _Expr.wide
+                            : _Expr.normal;
+                final lx = p > 0.12 ? sin(t * 13 + i) * p : 0.0;
+                _face(canvas, e, s * 0.9, s * 0.55, i, lx, -0.6, t, centerAt: c);
+              }
+              canvas.restore();
+            }
+
+            @override
+            bool shouldRepaint(covariant DicePainter old) => true;'''
+
+          edit('lib/table_view.dart', [
+              ("if (opacity <= 0) return;",
+               "if (Toon.on && Toon.holding && opacity < 1) _peek(canvas, size);\n    if (opacity <= 0) return;"),
+              ("final grow = min(1.10, 1 + lift / (s * 16));",
+               "// karakter modunda sert atışta zar ekrana doğru uçar gibi büyür\n"
+               "    final grow = Toon.on ? min(1.8, 1 + lift / (s * 6)) : min(1.10, 1 + lift / (s * 16));"),
+              ("canvas.scale(grow);",
+               "canvas.scale(Toon.on ? grow * (1 + 0.28 * d.squash) : grow, Toon.on ? grow * (1 - 0.3 * d.squash) : grow);"),
+              ("if (dropping) canvas.restore();",
+               "_toon(canvas, d, sim.dice.indexOf(d), s, toWorld, at, center, grow);\n    if (dropping) canvas.restore();"),
+              ("@override\n  bool shouldRepaint(covariant DicePainter old) => true;", TOON_METHODS),
+              ("/// Kahvehane masası: koyu ceviz, damarlar, kenar pervazı.", TOON_CLASS),
+          ])
+
+          edit('lib/physics.dart', [
+              ("int target = 1;", "int target = 1;\n  double squash = 0; // masaya sert düşünce yassılma (0..1)\n  double glare = 0; // öteki zara çarpınca ters bakış (0..1)"),
+              ("onHit(HitKind.table, (impact / (s * 13)).clamp(0.0, 1.0), _pan(d.x));",
+               "d.squash = max(d.squash, (impact / (s * 10)).clamp(0.0, 1.0));\n          onHit(HitKind.table, (impact / (s * 13)).clamp(0.0, 1.0), _pan(d.x));"),
+              ("onHit(HitKind.dice, (-rel / (s * 20)).clamp(0.0, 1.0), _pan((a.x + b.x) / 2));",
+               "a.glare = 1;\n          b.glare = 1;\n          onHit(HitKind.dice, (-rel / (s * 20)).clamp(0.0, 1.0), _pan((a.x + b.x) / 2));"),
+              ("_acc += dt;",
+               "_acc += dt;\n    for (final d in dice) {\n      d.squash = max(0.0, d.squash - dt * 4);\n      d.glare = max(0.0, d.glare - dt * 1.2);\n    }"),
+          ])
+
+          edit('lib/hand_screen.dart', [
+              ("_last = elapsed;",
+               "_last = elapsed;\n"
+               "    Toon.holding = phase == Phase.holding && !game.over;\n"
+               "    Toon.shake = (_shakeEnergy / 20).clamp(0.0, 1.0);\n"
+               "    if (Toon.on && phase != Phase.flying) _frame.value++; // göz kırpma, dans, panik"),
+              ("onChanged: (v) => setSheet(() => Feel.I.hapticsOn = v),\n            ),\n",
+               "onChanged: (v) => setSheet(() => Feel.I.hapticsOn = v),\n            ),\n"
+               "            SwitchListTile(\n"
+               "              title: const Text('Tıkır ile Pırto'),\n"
+               "              subtitle: const Text('Kapalıyken sade mod: karakterler ve komik efektler olmadan'),\n"
+               "              value: Toon.on,\n"
+               "              onChanged: (v) => setSheet(() => Toon.on = v),\n"
+               "            ),\n"),
+          ])
+          print('Tıkır ile Pırto eklendi (sürüm 28)')
           PATCH_EOF
 
       - name: Sesleri üret
