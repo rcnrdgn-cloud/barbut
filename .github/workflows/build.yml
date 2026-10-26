@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 26: sallama gücü atışa yansıyor): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 27: kaotik sert atış, kendiliğinden atış düzeltmesi): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -3848,6 +3848,70 @@ jobs:
               ("if (_t > 3.5) sc += _t - 3.5;", "if (_t > 3.5 + 1.5 * _st) sc += _t - 3.5 - 1.5 * _st;"),
           ])
           print('Sallama gücü atışa yansıtıldı (sürüm 26)')
+          PATCH_EOF
+
+      - name: Kaotik sert atış, kendiliğinden atış yok (sürüm 27)
+        working-directory: barbut_app
+        run: |
+          python3 - <<'PATCH_EOF'
+          import sys
+
+          def edit(path, pairs):
+              s = open(path, encoding='utf-8').read()
+              for item in pairs:
+                  old, new = item[0], item[1]
+                  n = item[2] if len(item) > 2 else 1
+                  if s.count(old) != n:
+                      sys.exit(f'YAMA BULUNAMADI: {path}: {old[:70]!r}')
+                  s = s.replace(old, new)
+              open(path, 'w', encoding='utf-8').write(s)
+
+          edit('lib/hand_screen.dart', [
+              # yatayı geçme kuralı yalnızca telefon sallanmıyorken (son 1 sn'de eğim 4°'den az oynadıysa)
+              ("if (_armed && tilt > pourAngle && (!shaking || _tiltSpeed > 60) &&",
+               "if (_armed && tilt > pourAngle && !shaking &&\n"
+               "        (deep == null || shallow == null || deep - shallow < 4) &&"),
+              # dururken it-durdur kuralı: hemen öncesinde hareket varsa (sallama) çalışmaz
+              ("_tossBlocked = now.difference(_tossBackAt).inMilliseconds < 120;",
+               "_tossBlocked = now.difference(_tossBackAt).inMilliseconds < 120 ||\n"
+               "          (firstMove != null && nowMs - firstMove > 120);"),
+              # hangi hareketin atışı başlattığı (menüde görünür)
+              ("void _release() {",
+               "String _lastTrigger = '';\n  String? _pendingTrigger;\n\n  void _release() {\n"
+               "    _lastTrigger = _pendingTrigger ?? 'yatayı geçme';\n    _pendingTrigger = null;"),
+              ("void _toss(double peak) {",
+               "void _toss(double peak) {\n    _lastTrigger = _pendingTrigger ?? 'ileri itip durdurma';\n    _pendingTrigger = null;"),
+              ("_tiltSpeed > 15) {", "_tiltSpeed > 15) {\n      _pendingTrigger = 'sallarken aşağı/düze indirme';"),
+              ("_toss(peak);", "_pendingTrigger = 'sallarken ileri savurma';\n      _toss(peak);"),
+              ("title: const Text('Yeni oyun'),",
+               "title: const Text('Yeni oyun'),\n"
+               "                        subtitle: _lastTrigger.isEmpty ? null : Text('Son atışı başlatan: $_lastTrigger'),"),
+          ])
+
+          edit('lib/physics.dart', [
+              # sert atışta daha az "düzgün" seçim: en doğal görünen deneme yerine daha rastgele
+              ("for (var k = 0; k < _candidates; k++) {",
+               "final nCand = (_candidates * (1.7 - strength) / 1.2).round().clamp(2, _candidates);\n"
+               "    for (var k = 0; k < nCand; k++) {"),
+              # her zar kendi hızında ve yönünde; sert atışta fark büyük
+              ("final speed = h * (0.5 + 1.25 * st) * (0.92 + 0.16 * _rng.nextDouble());",
+               "final speed = h * (0.5 + 1.25 * st) * (1 + (_rng.nextDouble() - 0.5) * 0.35 * st);"),
+              (": dx * 0.8 + (_rng.nextDouble() - 0.5) * (0.25 + 0.5 * st);",
+               ": dx * 0.8 + (_rng.nextDouble() - 0.5) * (0.2 + 0.9 * st);"),
+              # masaya her düşüşte: sert atış daha çok seker, daha az yavaşlar, köşesinden daha çok sapar
+              ("d.vz = hard ? impact * 0.5 : 0.0;", "d.vz = hard ? impact * (0.42 + 0.16 * _st) : 0.0;"),
+              ("final keep = hard ? 0.82 : 0.93;", "final keep = hard ? (0.76 + 0.08 * _st) : 0.93;"),
+              ("_turn(d, (_rng.nextDouble() - 0.5) * 0.5);", "_turn(d, (_rng.nextDouble() - 0.5) * (0.25 + 0.75 * _st));"),
+              ("_turn(d, (_rng.nextDouble() - 0.5) * 0.15);", "_turn(d, (_rng.nextDouble() - 0.5) * (0.08 + 0.25 * _st));"),
+              # kenarlardan daha canlı geri seker ve yana savrulur
+              ("= -d.vx * 0.6;", "= -d.vx * (0.5 + 0.2 * _st);", 2),
+              ("= -d.vy * 0.6;", "= -d.vy * (0.5 + 0.2 * _st);", 2),
+              ("* d.vx.abs() * 0.5;", "* d.vx.abs() * (0.3 + 0.5 * _st);", 2),
+              ("* d.vy.abs() * 0.5;", "* d.vy.abs() * (0.3 + 0.5 * _st);", 2),
+              # sert atış daha uzun yuvarlanır
+              ("double get _friction => s * 9;", "double get _friction => s * (11 - 3 * _st);"),
+          ])
+          print('Kaotik sert atış ve kendiliğinden atış düzeltmesi uygulandı (sürüm 27)')
           PATCH_EOF
 
       - name: Sesleri üret
