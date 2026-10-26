@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 21: tavla adları + ileri savurarak atış): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 22: tavla adları, ileri savurma, seyrek düşme): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -3591,7 +3591,7 @@ jobs:
           print('Tavla adları eklendi')
           PATCH_EOF
 
-      - name: İleri savurarak atış (sürüm 21)
+      - name: Atış hareketleri ve ayarlar (sürüm 22)
         working-directory: barbut_app
         run: |
           python3 - <<'PATCH_EOF'
@@ -3606,21 +3606,35 @@ jobs:
               open(path, 'w', encoding='utf-8').write(s)
 
           edit('lib/hand_screen.dart', [
+              # masadan düşme: her 10 atıştan biri yerine yaklaşık her 33 atıştan biri
+              ("static const dropChance = 0.10;", "static const dropChance = 0.03;"),
+              ("static const bothShare = 0.3;", "static const bothShare = 0.2;"),
+              # eğerek dökme daha çabuk: sallama sonrası bekleme kısaldı, hızlı devirmede hiç beklenmez
+              ("static const shakeQuietMs = 120;", "static const shakeQuietMs = 70;"),
+              ("if (_armed && tilt > pourAngle && !shaking &&",
+               "if (_armed && tilt > pourAngle && (!shaking || _tiltRate.abs() > 2.5) &&"),
+              ("DateTime.now().difference(_releasedAt).inMilliseconds > 1000",
+               "DateTime.now().difference(_releasedAt).inMilliseconds > 500"),
+              # sonuç yazısının altındaki açıklama yalnızca zar düştüğünde kalsın
+              ("Text(sub,", "if (fell > 0) Text(sub,"),
+              # ileri savurma
               ("double _tiltRate = 0; // ucun aşağı devrilme hızı (rad/s)",
                r'''double _tiltRate = 0; // ucun aşağı devrilme hızı (rad/s)
 
-            /// İleri savurma: telefon yere paralelken ileri itilip birden durdurulur (m/s²).
-            static const tossPush = 9.0, tossStop = 12.0;
-            DateTime _tossPushAt = DateTime(0);
+            /// İleri savurma eşikleri (m/s²): itiş, duruş, sakinlik.
+            static const tossPush = 5.0, tossStop = 7.0, tossCalm = 5.0;
+            DateTime _tossPushAt = DateTime(0), _tossBackAt = DateTime(0);
             DateTime? _tossStopAt, _tossCalmFrom;
+            bool _tossUp = false, _tossBlocked = false;
             double _tossPeak = 0;'''),
               ("if (!sensorsOk && mounted) setState(() => sensorsOk = true);",
                "if (!sensorsOk && mounted) setState(() => sensorsOk = true);\n"
                "                    _checkToss(e.x, e.y, e.z);"),
               ("/* ---------------- elde ---------------- */",
-               r'''/// Fincanı yere paralel tutup ileri savurma: önce telefonun ucu yönünde güçlü bir
-            /// itiş, hemen ardından sert bir duruş ve en az 70 ms sakinlik. Sallamada ivme
-            /// sürekli yön değiştirdiği için bu sakinlik oluşmaz, yanlışlıkla atış olmaz.
+               r'''/// Fincanı ileri savurma. "İleri", telefon hangi açıda tutulursa tutulsun telefonun
+            /// ucunun yere paralel baktığı yöndür. Önce o yöne bir itiş, hemen ardından sert bir
+            /// duruş ve 60 ms sakinlik: zarlar fincan durunca ileri fırlar. Sallamada her itişten
+            /// hemen önce bir geri hamle olur ve ardından sakinlik gelmez; bu yüzden sayılmaz.
             void _checkToss(double ex, double ey, double ez) {
               if (phase != Phase.holding || game.over) {
                 _tossStopAt = null;
@@ -3628,39 +3642,57 @@ jobs:
               }
               final now = DateTime.now();
               if (now.difference(_phaseStart).inMilliseconds < 300) return;
+              final gn = sqrt(_gx * _gx + _gy * _gy + _gz * _gz);
+              if (gn < 1) return;
+              final ux = _gx / gn, uy = _gy / gn, uz = _gz / gn; // telefona göre yukarı
+              var fx = -uy * ux, fy = 1 - uy * uy, fz = -uy * uz; // telefonun ucunun yataydaki yönü
+              final fn = sqrt(fx * fx + fy * fy + fz * fz);
+              final level = uz > 0.2 && fn > 0.55; // ekran yukarı bakıyor, telefon dik değil
+              if (fn < 0.01) return;
+              fx /= fn;
+              fy /= fn;
+              fz /= fn;
               final lx = ex - _gx, ly = ey - _gy, lz = ez - _gz; // yerçekimi çıkarılmış ivme
-              final level = _gz > 6.5; // ekran yukarı, aşağı yukarı yere paralel
-              if (level && ly > tossPush && ly.abs() > 1.5 * lx.abs()) {
-                _tossPushAt = now;
-                _tossPeak = max(_tossPeak, ly);
+              final lf = lx * fx + ly * fy + lz * fz; // ileri bileşen
+              final lu = lx * ux + ly * uy + lz * uz;
+              final sx = lx - lf * fx - lu * ux, sy = ly - lf * fy - lu * uy, sz = lz - lf * fz - lu * uz;
+              final lat = sqrt(sx * sx + sy * sy + sz * sz); // yana bileşen
+
+              final up = level && lf > tossPush && lf > 1.2 * lat;
+              if (up && !_tossUp) {
+                // yeni bir itiş başlıyor: hemen öncesinde geri hamle varsa bu bir sallamadır
+                _tossBlocked = now.difference(_tossBackAt).inMilliseconds < 120;
+                if (_tossBlocked) _tossStopAt = null;
+                _tossPeak = 0;
               }
-              final pushed = now.difference(_tossPushAt).inMilliseconds < 350;
-              if (level && pushed && ly < -tossStop) {
+              _tossUp = up;
+              if (up) {
+                _tossPushAt = now;
+                _tossPeak = max(_tossPeak, lf);
+              }
+              if (lf < -tossPush) _tossBackAt = now;
+              final pushed = now.difference(_tossPushAt).inMilliseconds < 400;
+              if (level && pushed && !_tossBlocked && lf < -tossStop) {
                 _tossStopAt = now;
                 _tossCalmFrom = null;
               }
               final stop = _tossStopAt;
-              if (stop != null) {
-                final calm = sqrt(lx * lx + ly * ly + lz * lz) < 6;
-                _tossCalmFrom = calm ? (_tossCalmFrom ?? now) : null;
-                final calmFrom = _tossCalmFrom;
-                if (now.difference(stop).inMilliseconds > 450) {
-                  _tossStopAt = null;
-                  _tossPeak = 0;
-                } else if (calmFrom != null && now.difference(calmFrom).inMilliseconds >= 70) {
-                  final peak = _tossPeak;
-                  _tossStopAt = null;
-                  _tossPeak = 0;
-                  _toss(peak);
-                }
+              if (stop == null) return;
+              final calm = sqrt(lx * lx + ly * ly + lz * lz) < tossCalm;
+              _tossCalmFrom = calm ? (_tossCalmFrom ?? now) : null;
+              final calmFrom = _tossCalmFrom;
+              if (now.difference(stop).inMilliseconds > 450) {
+                _tossStopAt = null;
+              } else if (calmFrom != null && now.difference(calmFrom).inMilliseconds >= 60) {
+                _tossStopAt = null;
+                _toss(_tossPeak);
               }
-              if (!pushed && _tossStopAt == null) _tossPeak = 0;
             }
 
             void _toss(double peak) {
               if (phase != Phase.holding || game.over || table == null) return;
               // savurma ne kadar sertse, sallama ne kadar çoksa zarlar o kadar güçlü gider
-              _releaseStrength = max(_shakeStrength, (0.6 + peak / 30).clamp(0.6, 1.4));
+              _releaseStrength = max(_shakeStrength, (0.6 + peak / 20).clamp(0.6, 1.4));
               _shakeEnergy = 0;
               _releasedAt = DateTime.now();
               ImpactFeel.I.release(_releaseStrength);
@@ -3674,9 +3706,9 @@ jobs:
 
             /* ---------------- elde ---------------- */'''),
               ("'ucu yatayı aşağı doğru geçtiği an zarlar dökülür.';",
-               "'ucunu yatayın altına indir ya da telefonu yatay tutup ileri doğru savur: zarlar dökülür.';"),
+               "'ucunu yatayın altına indir ya da fincanı ileri savurur gibi telefonu ileri itip durdur: zarlar dökülür.';"),
           ])
-          print('İleri savurarak atış eklendi')
+          print('Atış hareketleri ve ayarlar uygulandı')
           PATCH_EOF
 
       - name: Sesleri üret
