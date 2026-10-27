@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 29: çizgi film Tıkır ile Pırto): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 29.1: çizgi film Tıkır ile Pırto, derleme düzeltmesi): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -4022,7 +4022,7 @@ jobs:
               if (sp > s * 2 && !d.settled && inflate == 0) {
                 // hızlı giderken hareket yönünde uzar
                 final dir = atan2(d.vy, d.vx);
-                final st = 1 + min(0.3, sp / (s * 45));
+                final double st = 1.0 + min(0.3, sp / (s * 45)).toDouble();
                 canvas.rotate(dir);
                 canvas.scale(st, 1 / st);
                 canvas.rotate(-dir);
