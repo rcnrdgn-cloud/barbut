@@ -2794,8 +2794,8 @@ jobs:
               'lose_fun', 'coin_1', 'coin_2', 'coin_3',
             ];
 
-            /// Müzikler üretilmiş WAV, zar sesleri gerçek kayıtlardan kesilmiş OGG.
-            static const _wav = {'final', 'lose', 'lose_fun', 'pass', 'win', 'win_fun'};
+            /// Müzikler ve akçe sesleri üretilmiş WAV, zar sesleri gerçek kayıtlardan kesilmiş OGG.
+            static const _wav = {'final', 'lose', 'lose_fun', 'pass', 'win', 'win_fun', 'coin_1', 'coin_2', 'coin_3'};
 
             final Map<String, AudioSource> _sources = {};
             bool get ready => _sources.isNotEmpty;
