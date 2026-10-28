@@ -807,12 +807,10 @@ jobs:
             final game = Game();
             final _rng = Random();
 
-            // --- akçe: pot, uçan akçeler, sayan bakiye, akçe yağmuru
+            // --- akçe: uçan akçeler, sayan bakiye, akçe yağmuru
             final _money = ValueNotifier<int>(0);
             final List<double> _shown = [Game.start.toDouble(), Game.start.toDouble()]; // ekranda sayılan
             final List<double> _goal = [Game.start.toDouble(), Game.start.toDouble()]; // sayacın varacağı
-            final List<int> _put = [0, 0]; // bu elde pota konan akçe
-            int _potCoins = 0; // masanın ortasında duran akçe sayısı
             final List<_Coin> _coins = [];
             double _clock = 0;
             DateTime _lastClink = DateTime(0);
@@ -1315,7 +1313,6 @@ jobs:
                     onPanEnd: (d) => _flick(d.velocity.pixelsPerSecond),
                     child: Stack(children: [
                       const Positioned.fill(child: RepaintBoundary(child: CustomPaint(painter: WoodTablePainter()))),
-                      Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _PotPainter(this, _money)))),
                       Positioned.fill(
                         child: IgnorePointer(
                           child: CustomPaint(painter: DicePainter(table!, _frame, opacity: diceOpacity)),
@@ -1397,8 +1394,6 @@ jobs:
 
             /* ---------------- akçe ---------------- */
 
-            Offset get _potAt => Offset(_screen.width / 2, _screen.height * 0.5);
-
             /// Skor yazısının sağ ucu: akçeler oraya uçar, oradan kalkar.
             Offset _chip(int i) {
               final box = _scoreKeys[i].currentContext?.findRenderObject();
@@ -1412,16 +1407,13 @@ jobs:
             void _sync() {
               if (_coins.isNotEmpty) return;
               for (var i = 0; i < 2; i++) {
-                _goal[i] = (game.akce[i] - (game.target != null ? _put[i] : 0)).toDouble();
+                _goal[i] = game.akce[i].toDouble();
               }
               _money.value++;
             }
 
             void _resetMoney() {
               _coins.clear();
-              _put[0] = 0;
-              _put[1] = 0;
-              _potCoins = 0;
               _sync();
               Purse.save(game.akce);
             }
@@ -1437,50 +1429,19 @@ jobs:
               _coins.add(_Coin(from: from, to: to, start: _clock + delay, dur: 0.55, onLeave: onLeave, onArrive: onArrive));
             }
 
-            /// El sonucuna göre akçelerin hareketi: ilk atışta iki taraf pota koyar,
-            /// el bitince pot kazanana (berabere ise sahiplerine) gider.
+            /// El sonucuna göre akçelerin hareketi: masada akçe beklemez; el bitince
+            /// kaybedenin skorundan doğrudan kazananın skoruna uçar.
             void _moneyFor(Roll r, bool ends) {
-              final pot = _potAt;
-              if (r.out == Outcome.first) {
-                for (var i = 0; i < 2; i++) {
-                  _put[i] = min(Game.stake, game.akce[i]);
-                  const n = 5;
-                  final per = _put[i] / n;
-                  final side = i == 0 ? -16.0 : 16.0;
-                  for (var k = 0; k < n; k++) {
-                    _fly(_chip(i), pot + Offset(side, 0), 0.06 * k + 0.15 * i, onLeave: () => _goal[i] -= per, onArrive: () {
-                      _potCoins++;
-                      _clink(0.4);
-                    });
-                  }
-                }
-                _money.value++;
-                return;
-              }
-              final total = _put[0] + _put[1];
-              if (total > 0) {
-                final taker = r.taker;
-                if (taker == null) {
-                  // berabere: herkes kendi akçesini geri alır
-                  for (var i = 0; i < 2; i++) {
-                    const n = 5;
-                    final per = _put[i] / n;
-                    for (var k = 0; k < n; k++) {
-                      _fly(pot, _chip(i), 0.35 + 0.06 * k + 0.15 * i,
-                          onLeave: () => _potCoins = max(0, _potCoins - 1), onArrive: () => _goal[i] += per);
-                    }
-                  }
-                } else {
-                  const n = 10;
-                  final per = total / n;
-                  for (var k = 0; k < n; k++) {
-                    _fly(pot, _chip(taker), 0.45 + 0.07 * k,
-                        onLeave: () => _potCoins = max(0, _potCoins - 1), onArrive: () => _goal[taker] += per);
-                  }
+              final taker = r.taker;
+              if (taker != null && r.amount > 0) {
+                final giver = 1 - taker;
+                const n = 8;
+                final per = r.amount / n;
+                for (var k = 0; k < n; k++) {
+                  _fly(_chip(giver), _chip(taker), 0.45 + 0.07 * k,
+                      onLeave: () => _goal[giver] -= per, onArrive: () => _goal[taker] += per);
                 }
               }
-              _put[0] = 0;
-              _put[1] = 0;
               // büyük an: oyunu bitiren atış ya da düşeşle kazanmak
               final big = r.taker != null && (ends || (r.d1 == 6 && r.d2 == 6));
               if (big) _shower();
@@ -1559,12 +1520,12 @@ jobs:
                                     const Color(0xFFF2D58A)
                                   ),
                                 Outcome.win => (
-                                    'Geçti!',
+                                    'Kazandı!',
                                     '$who ${r.sum} attı · hedef ${r.target} geçildi · ${r.amount} akçe kazandı',
                                     const Color(0xFFB8F0D2)
                                   ),
                                 Outcome.lose => (
-                                    'Geçemedi',
+                                    'Kaybetti',
                                     '$who ${r.sum} attı · hedef ${r.target} geçilemedi · ${2 - r.by}. oyuncu ${r.amount} akçe kazandı',
                                     const Color(0xFFFFB3BF)
                                   ),
@@ -1600,8 +1561,8 @@ jobs:
                   ? ('zar düştü, sayılmaz', const Color(0xFFF2D58A))
                   : switch (r.out) {
                       Outcome.first => (rollName(r.d1, r.d2), const Color(0xFFF2D58A)),
-                      Outcome.win => ('${rollName(r.d1, r.d2)} · geçti +${r.amount}', Palette.win),
-                      Outcome.lose => ('${rollName(r.d1, r.d2)} · geçemedi −${r.amount}', Palette.lose),
+                      Outcome.win => ('${rollName(r.d1, r.d2)} · kazandı +${r.amount}', Palette.win),
+                      Outcome.lose => ('${rollName(r.d1, r.d2)} · kaybetti −${r.amount}', Palette.lose),
                       Outcome.tie => ('${rollName(r.d1, r.d2)} · berabere', const Color(0xB3E9E1CE)),
                     };
               return Container(
@@ -1647,10 +1608,7 @@ jobs:
               final vessel = cup.palm ? 'Zarlar avucunda' : 'Zarlar fincanda';
               final target = game.target;
               final String hint;
-              if (target != null) {
-                // ikinci atan neyi atarsa ne olacağını her an görsün
-                hint = targetHint(target);
-              } else if (phase != Phase.holding) {
+              if (target != null || phase != Phase.holding) {
                 hint = '';
               } else if (!sensorsOk) {
                 hint = 'Atmak için ekranda parmağınla aşağıdan yukarı fırlat.';
@@ -1846,57 +1804,7 @@ jobs:
                   ..color = gold ? const Color(0x998A6210) : const Color(0x996E7378));
           }
 
-          /// Masanın ortasındaki pot: iki yığın akçe ve toplamı.
-          class _PotPainter extends CustomPainter {
-            _PotPainter(this.s, Listenable repaint) : super(repaint: repaint);
-            final _HandScreenState s;
-
-            @override
-            void paint(Canvas canvas, Size size) {
-              final n = s._potCoins;
-              if (n <= 0) return;
-              final pot = s._potAt;
-              const r = 13.0;
-              canvas.drawOval(Rect.fromCenter(center: pot + const Offset(0, 6), width: 86, height: 28),
-                  Paint()
-                    ..color = const Color(0x55000000)
-                    ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
-              for (var k = 0; k < n; k++) {
-                final stack = k.isEven ? -16.0 : 16.0;
-                final level = k ~/ 2;
-                final p = pot + Offset(stack + (k % 3 - 1) * 1.5, -level * 3.2);
-                final rect = Rect.fromCenter(center: p, width: r * 2, height: r * 0.95);
-                canvas.drawOval(rect.shift(const Offset(0, 2.5)), Paint()..color = const Color(0xFF6E7378));
-                canvas.drawOval(
-                    rect,
-                    Paint()
-                      ..shader = const LinearGradient(colors: [Color(0xFFF4F4F4), Color(0xFFA8ADB2)]).createShader(rect));
-                canvas.drawOval(
-                    rect,
-                    Paint()
-                      ..style = PaintingStyle.stroke
-                      ..strokeWidth = 1
-                      ..color = const Color(0xFF6E7378));
-              }
-              final total = s._put[0] + s._put[1];
-              if (total > 0) {
-                final tp = TextPainter(
-                  text: TextSpan(
-                    text: '$total akçe',
-                    style: const TextStyle(
-                        color: Color(0xFFF2D58A), fontSize: 13, fontWeight: FontWeight.w700, shadows: [Shadow(color: Colors.black, blurRadius: 6)]),
-                  ),
-                  textDirection: TextDirection.ltr,
-                )..layout();
-                tp.paint(canvas, pot + Offset(-tp.width / 2, 16));
-              }
-            }
-
-            @override
-            bool shouldRepaint(covariant _PotPainter old) => true;
-          }
-
-          /// Uçan akçeler (skordan pota, pottan kazanana) ve akçe yağmuru.
+          /// Uçan akçeler (kaybedenden kazanana) ve akçe yağmuru.
           class _CoinPainter extends CustomPainter {
             _CoinPainter(this.s, Listenable repaint) : super(repaint: repaint);
             final _HandScreenState s;
@@ -3081,8 +2989,8 @@ jobs:
               final who = '${r.by + 1}. oyuncu';
               final (String title, String sub, Color color) = switch (r.out) {
                 Outcome.first => (rollName(r.d1, r.d2), '$who ${r.sum} attı · rakip ${r.sum} sayısını geçmeye çalışacak', Palette.gold),
-                Outcome.win => ('Geçti!', '$who ${r.sum} attı · ${r.amount} akçe kazandı', const Color(0xFF9FE0BE)),
-                Outcome.lose => ('Geçemedi', '$who ${r.sum} attı · ${r.amount} akçe kaybetti', const Color(0xFFF49AA8)),
+                Outcome.win => ('Kazandı!', '$who ${r.sum} attı · ${r.amount} akçe kazandı', const Color(0xFF9FE0BE)),
+                Outcome.lose => ('Kaybetti', '$who ${r.sum} attı · ${r.amount} akçe kaybetti', const Color(0xFFF49AA8)),
                 Outcome.tie => ('Berabere', '$who da ${r.sum} attı', Palette.ink),
               };
               return Column(children: [
