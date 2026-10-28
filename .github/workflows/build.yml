@@ -1,6 +1,6 @@
 name: Uygulamayı derle
 
-# Tek dosyalık kurulum (sürüm 31: gerçekçi zarlar, parmakla fırlatma): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
+# Tek dosyalık kurulum (sürüm 32: akçe: pot, sayaç, akçe yağmuru, kalıcı kese): tüm Barbut kodu ve sesleri bu dosyanın içinden üretilir.
 # Depoda başka hiçbir dosyaya gerek yoktur.
 
 on:
@@ -51,6 +51,7 @@ jobs:
             flutter_soloud: ">=2.1.0 <4.0.0"
             sensors_plus: ^6.1.0
             vibration: ">=2.0.0 <4.0.0"
+            shared_preferences: ^2.2.0
 
           dev_dependencies:
             flutter_test:
@@ -401,6 +402,12 @@ jobs:
               }
             }
 
+            /// Tek akçenin şıngırtısı ve küçük bir titreşim.
+            void coin({double volume = 0.55}) {
+              _play('coin_${1 + _rng.nextInt(3)}', volume: volume);
+              _hit(6, 50, HapticFeedback.selectionClick);
+            }
+
             /// Telefon sallanırken zarın kupada çarpması.
             void tick(double power) {
               _play('tick_${1 + _rng.nextInt(4)}', volume: (0.45 + power / 40).clamp(0.4, 1.0));
@@ -575,15 +582,24 @@ jobs:
               if (akce[1] <= 0) winner = 0;
             }
 
+            /// Yeni oyun: kese kalıcıdır, yalnızca batan oyuncuya kahveci veresiye verir.
             void reset() {
               final w = winner;
-              akce[0] = start;
-              akce[1] = start;
+              for (var i = 0; i < 2; i++) {
+                if (akce[i] <= 0) akce[i] = start;
+              }
               starter = w == null ? 0 : 1 - w; // kaybeden başlar
               turn = starter;
               target = null;
               winner = null;
               log.clear();
+            }
+
+            /// İki kese de baştan.
+            void resetPurses() {
+              akce[0] = start;
+              akce[1] = start;
+              reset();
             }
           }
 
@@ -757,6 +773,7 @@ jobs:
           import 'hand_feel.dart';
           import 'palette.dart';
           import 'physics.dart';
+          import 'purse.dart';
           import 'table_screen.dart';
           import 'table_view.dart';
 
@@ -789,6 +806,18 @@ jobs:
 
             final game = Game();
             final _rng = Random();
+
+            // --- akçe: pot, uçan akçeler, sayan bakiye, akçe yağmuru
+            final _money = ValueNotifier<int>(0);
+            final List<double> _shown = [Game.start.toDouble(), Game.start.toDouble()]; // ekranda sayılan
+            final List<double> _goal = [Game.start.toDouble(), Game.start.toDouble()]; // sayacın varacağı
+            final List<int> _put = [0, 0]; // bu elde pota konan akçe
+            int _potCoins = 0; // masanın ortasında duran akçe sayısı
+            final List<_Coin> _coins = [];
+            double _clock = 0;
+            DateTime _lastClink = DateTime(0);
+            final List<GlobalKey> _scoreKeys = [GlobalKey(), GlobalKey()];
+            Size _screen = Size.zero;
             late final CupSim cup = CupSim(onHit: _onCupHit);
             TableSim? table;
             final _frame = ValueNotifier<int>(0);
@@ -841,6 +870,16 @@ jobs:
               super.initState();
               _ticker = createTicker(_onTick)..start();
               _startSensors();
+              Purse.load().then((l) {
+                if (l == null || !mounted) return;
+                setState(() {
+                  for (var i = 0; i < 2; i++) {
+                    game.akce[i] = l[i] > 0 ? l[i] : Game.start;
+                    _shown[i] = game.akce[i].toDouble();
+                  }
+                });
+                _sync();
+              });
               _guardUi(() => SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky));
             }
 
@@ -1174,6 +1213,7 @@ jobs:
             void _onTick(Duration elapsed) {
               final dt = ((elapsed - _last).inMicroseconds / 1e6).clamp(0.0, 0.05);
               _last = elapsed;
+              _tickMoney(dt);
               if (phase == Phase.holding) {
                 cup.step(dt);
                 // dökme algılaması algılayıcı olaylarında, anında yapılır (_checkPour)
@@ -1208,7 +1248,11 @@ jobs:
               _timer = Timer(const Duration(milliseconds: 250), () {
                 if (!mounted) return;
                 setState(() {
-                  if (fellNow == 0) game.apply(r);
+                  if (fellNow == 0) {
+                    game.apply(r);
+                    _moneyFor(r, ends);
+                    Purse.save(game.akce);
+                  }
                   shown = r;
                   fell = fellNow;
                   verdictAbove = avgY > t.size.height * 0.5;
@@ -1234,6 +1278,7 @@ jobs:
               _phaseStart = DateTime.now();
               setState(() {
                 game.reset();
+                _resetMoney();
                 shown = null;
                 pending = null;
                 fell = 0;
@@ -1251,6 +1296,7 @@ jobs:
                 backgroundColor: Colors.black,
                 body: LayoutBuilder(builder: (context, c) {
                   final size = Size(c.maxWidth, c.maxHeight);
+                  _screen = size;
                   final t = table;
                   if (t == null) {
                     table = TableSim(size, onHit: (k, s, p) => ImpactFeel.I.table(k, s, p));
@@ -1269,6 +1315,7 @@ jobs:
                     onPanEnd: (d) => _flick(d.velocity.pixelsPerSecond),
                     child: Stack(children: [
                       const Positioned.fill(child: RepaintBoundary(child: CustomPaint(painter: WoodTablePainter()))),
+                      Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _PotPainter(this, _money)))),
                       Positioned.fill(
                         child: IgnorePointer(
                           child: CustomPaint(painter: DicePainter(table!, _frame, opacity: diceOpacity)),
@@ -1277,6 +1324,7 @@ jobs:
                       Positioned.fill(child: IgnorePointer(child: _verdict())),
                       Positioned(left: 0, right: 0, top: 0, child: SafeArea(child: _hud())),
                       Positioned(left: 0, right: 0, bottom: 0, child: SafeArea(child: _bottom())),
+                      Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _CoinPainter(this, _money)))),
                     ]),
                   );
                 }),
@@ -1328,14 +1376,164 @@ jobs:
 
             Widget _score(int i) {
               final active = !game.over && game.turn == i;
-              return Text(
-                '${i + 1}. oyuncu  ${game.akce[i]}',
-                style: TextStyle(
-                  color: active ? Palette.gold : const Color(0xB3E9E1CE),
-                  fontWeight: active ? FontWeight.w700 : FontWeight.w400,
-                  fontSize: 15,
-                ),
+              return ValueListenableBuilder<int>(
+                key: _scoreKeys[i],
+                valueListenable: _money,
+                builder: (context, _, __) {
+                  // akçe gelirken yeşil, giderken kırmızı yanar
+                  final d = _goal[i] - _shown[i];
+                  final color = d > 0.5
+                      ? const Color(0xFF9BE58A)
+                      : d < -0.5
+                          ? const Color(0xFFFF8A80)
+                          : (active ? Palette.gold : const Color(0xB3E9E1CE));
+                  return Text(
+                    '${i + 1}. oyuncu  ${_shown[i].round()}',
+                    style: TextStyle(color: color, fontWeight: active ? FontWeight.w700 : FontWeight.w400, fontSize: 15),
+                  );
+                },
               );
+            }
+
+            /* ---------------- akçe ---------------- */
+
+            Offset get _potAt => Offset(_screen.width / 2, _screen.height * 0.5);
+
+            /// Skor yazısının sağ ucu: akçeler oraya uçar, oradan kalkar.
+            Offset _chip(int i) {
+              final box = _scoreKeys[i].currentContext?.findRenderObject();
+              if (box is RenderBox && box.hasSize && box.attached) {
+                return box.localToGlobal(Offset(box.size.width - 14, box.size.height / 2));
+              }
+              return Offset(_screen.width * (i == 0 ? 0.25 : 0.5), 60);
+            }
+
+            /// Uçan akçe kalmadıysa sayaç gerçek keseyle eşitlenir.
+            void _sync() {
+              if (_coins.isNotEmpty) return;
+              for (var i = 0; i < 2; i++) {
+                _goal[i] = (game.akce[i] - (game.target != null ? _put[i] : 0)).toDouble();
+              }
+              _money.value++;
+            }
+
+            void _resetMoney() {
+              _coins.clear();
+              _put[0] = 0;
+              _put[1] = 0;
+              _potCoins = 0;
+              _sync();
+              Purse.save(game.akce);
+            }
+
+            void _clink(double volume) {
+              final now = DateTime.now();
+              if (now.difference(_lastClink).inMilliseconds < 40) return;
+              _lastClink = now;
+              Feel.I.coin(volume: volume);
+            }
+
+            void _fly(Offset from, Offset to, double delay, {void Function()? onLeave, void Function()? onArrive}) {
+              _coins.add(_Coin(from: from, to: to, start: _clock + delay, dur: 0.55, onLeave: onLeave, onArrive: onArrive));
+            }
+
+            /// El sonucuna göre akçelerin hareketi: ilk atışta iki taraf pota koyar,
+            /// el bitince pot kazanana (berabere ise sahiplerine) gider.
+            void _moneyFor(Roll r, bool ends) {
+              final pot = _potAt;
+              if (r.out == Outcome.first) {
+                for (var i = 0; i < 2; i++) {
+                  _put[i] = min(Game.stake, game.akce[i]);
+                  const n = 5;
+                  final per = _put[i] / n;
+                  final side = i == 0 ? -16.0 : 16.0;
+                  for (var k = 0; k < n; k++) {
+                    _fly(_chip(i), pot + Offset(side, 0), 0.06 * k + 0.15 * i, onLeave: () => _goal[i] -= per, onArrive: () {
+                      _potCoins++;
+                      _clink(0.4);
+                    });
+                  }
+                }
+                _money.value++;
+                return;
+              }
+              final total = _put[0] + _put[1];
+              if (total > 0) {
+                final taker = r.taker;
+                if (taker == null) {
+                  // berabere: herkes kendi akçesini geri alır
+                  for (var i = 0; i < 2; i++) {
+                    const n = 5;
+                    final per = _put[i] / n;
+                    for (var k = 0; k < n; k++) {
+                      _fly(pot, _chip(i), 0.35 + 0.06 * k + 0.15 * i,
+                          onLeave: () => _potCoins = max(0, _potCoins - 1), onArrive: () => _goal[i] += per);
+                    }
+                  }
+                } else {
+                  const n = 10;
+                  final per = total / n;
+                  for (var k = 0; k < n; k++) {
+                    _fly(pot, _chip(taker), 0.45 + 0.07 * k,
+                        onLeave: () => _potCoins = max(0, _potCoins - 1), onArrive: () => _goal[taker] += per);
+                  }
+                }
+              }
+              _put[0] = 0;
+              _put[1] = 0;
+              // büyük an: oyunu bitiren atış ya da düşeşle kazanmak
+              final big = r.taker != null && (ends || (r.d1 == 6 && r.d2 == 6));
+              if (big) _shower();
+              _money.value++;
+            }
+
+            /// Akçe yağmuru: ekranın üstünden altınlar dökülür.
+            void _shower() {
+              for (var k = 0; k < 45; k++) {
+                _coins.add(_Coin(
+                  from: Offset(_rng.nextDouble() * _screen.width, -20 - _rng.nextDouble() * 140),
+                  to: Offset.zero,
+                  start: _clock + 0.6 + k * 0.025,
+                  dur: 1.7,
+                  gold: true,
+                  shower: true,
+                  vx: (_rng.nextDouble() - 0.5) * 140,
+                  spin: 6 + _rng.nextDouble() * 10,
+                  onLeave: k % 3 == 0 ? () => _clink(0.65) : null,
+                ));
+              }
+            }
+
+            void _tickMoney(double dt) {
+              _clock += dt;
+              var changed = false;
+              if (_coins.isNotEmpty) {
+                for (final c in _coins) {
+                  if (!c.left && _clock >= c.start) {
+                    c.left = true;
+                    c.onLeave?.call();
+                  }
+                  if (!c.arrived && _clock >= c.start + c.dur) {
+                    c.arrived = true;
+                    c.onArrive?.call();
+                  }
+                }
+                _coins.removeWhere((c) => c.arrived);
+                if (_coins.isEmpty) _sync();
+                changed = true;
+              }
+              // sayaç: akçe akçe sayar, artarken her akçede şıngırdar
+              for (var i = 0; i < 2; i++) {
+                final d = _goal[i] - _shown[i];
+                if (d.abs() > 0.01) {
+                  final step = max(25.0, d.abs() * 6) * dt;
+                  final before = _shown[i].floor();
+                  _shown[i] = d.abs() <= step ? _goal[i] : _shown[i] + step * d.sign;
+                  if (d > 0 && _shown[i].floor() != before) _clink(0.3);
+                  changed = true;
+                }
+              }
+              if (changed) _money.value++;
             }
 
             Widget _verdict() {
@@ -1570,6 +1768,18 @@ jobs:
                         },
                       ),
                       ListTile(
+                        leading: const Icon(Icons.savings_outlined),
+                        title: const Text('Keseleri sıfırla'),
+                        subtitle: const Text('İki oyuncu da 100 akçeyle başlar'),
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          setState(() {
+                            game.resetPurses();
+                            _resetMoney();
+                          });
+                        },
+                      ),
+                      ListTile(
                         leading: const Icon(Icons.grid_view),
                         title: const Text('Klasik masa'),
                         onTap: () {
@@ -1589,6 +1799,129 @@ jobs:
                 ),
               );
             }
+          }
+
+          /// Uçan ya da yağan bir akçe.
+          class _Coin {
+            _Coin({
+              required this.from,
+              required this.to,
+              required this.start,
+              required this.dur,
+              this.gold = false,
+              this.shower = false,
+              this.vx = 0,
+              this.spin = 0,
+              this.onLeave,
+              this.onArrive,
+            });
+
+            final Offset from, to;
+            final double start, dur, vx, spin;
+            final bool gold, shower;
+            final void Function()? onLeave, onArrive;
+            bool left = false, arrived = false;
+          }
+
+          /// Tek akçe: dönerken daralıp genişleyen parlak disk.
+          void _drawCoin(Canvas c, Offset p, double r, {bool gold = false, double flip = 1}) {
+            final f = max(0.15, flip.abs());
+            final rect = Rect.fromCenter(center: p, width: r * 2 * f, height: r * 2);
+            final colors = gold ? const [Color(0xFFFFE27A), Color(0xFFC9931E)] : const [Color(0xFFF4F4F4), Color(0xFF9EA3A8)];
+            c.drawOval(
+                rect,
+                Paint()
+                  ..shader = LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: colors).createShader(rect));
+            c.drawOval(
+                rect,
+                Paint()
+                  ..style = PaintingStyle.stroke
+                  ..strokeWidth = max(1.0, r * 0.14)
+                  ..color = gold ? const Color(0xFF8A6210) : const Color(0xFF6E7378));
+            c.drawOval(
+                Rect.fromCenter(center: p, width: r * 1.2 * f, height: r * 1.2),
+                Paint()
+                  ..style = PaintingStyle.stroke
+                  ..strokeWidth = max(0.8, r * 0.08)
+                  ..color = gold ? const Color(0x998A6210) : const Color(0x996E7378));
+          }
+
+          /// Masanın ortasındaki pot: iki yığın akçe ve toplamı.
+          class _PotPainter extends CustomPainter {
+            _PotPainter(this.s, Listenable repaint) : super(repaint: repaint);
+            final _HandScreenState s;
+
+            @override
+            void paint(Canvas canvas, Size size) {
+              final n = s._potCoins;
+              if (n <= 0) return;
+              final pot = s._potAt;
+              const r = 13.0;
+              canvas.drawOval(Rect.fromCenter(center: pot + const Offset(0, 6), width: 86, height: 28),
+                  Paint()
+                    ..color = const Color(0x55000000)
+                    ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
+              for (var k = 0; k < n; k++) {
+                final stack = k.isEven ? -16.0 : 16.0;
+                final level = k ~/ 2;
+                final p = pot + Offset(stack + (k % 3 - 1) * 1.5, -level * 3.2);
+                final rect = Rect.fromCenter(center: p, width: r * 2, height: r * 0.95);
+                canvas.drawOval(rect.shift(const Offset(0, 2.5)), Paint()..color = const Color(0xFF6E7378));
+                canvas.drawOval(
+                    rect,
+                    Paint()
+                      ..shader = const LinearGradient(colors: [Color(0xFFF4F4F4), Color(0xFFA8ADB2)]).createShader(rect));
+                canvas.drawOval(
+                    rect,
+                    Paint()
+                      ..style = PaintingStyle.stroke
+                      ..strokeWidth = 1
+                      ..color = const Color(0xFF6E7378));
+              }
+              final total = s._put[0] + s._put[1];
+              if (total > 0) {
+                final tp = TextPainter(
+                  text: TextSpan(
+                    text: '$total akçe',
+                    style: const TextStyle(
+                        color: Color(0xFFF2D58A), fontSize: 13, fontWeight: FontWeight.w700, shadows: [Shadow(color: Colors.black, blurRadius: 6)]),
+                  ),
+                  textDirection: TextDirection.ltr,
+                )..layout();
+                tp.paint(canvas, pot + Offset(-tp.width / 2, 16));
+              }
+            }
+
+            @override
+            bool shouldRepaint(covariant _PotPainter old) => true;
+          }
+
+          /// Uçan akçeler (skordan pota, pottan kazanana) ve akçe yağmuru.
+          class _CoinPainter extends CustomPainter {
+            _CoinPainter(this.s, Listenable repaint) : super(repaint: repaint);
+            final _HandScreenState s;
+
+            @override
+            void paint(Canvas canvas, Size size) {
+              final now = s._clock;
+              for (final c in s._coins) {
+                if (now < c.start) continue;
+                final el = now - c.start;
+                if (c.shower) {
+                  final p = c.from + Offset(c.vx * el, 900 * el * el);
+                  _drawCoin(canvas, p, 11, gold: true, flip: cos(el * c.spin));
+                  continue;
+                }
+                final t = Curves.easeInOut.transform((el / c.dur).clamp(0.0, 1.0).toDouble());
+                // yay çizerek uçar
+                final ctrl = Offset((c.from.dx + c.to.dx) / 2, min(c.from.dy, c.to.dy) - 70);
+                final a = Offset.lerp(c.from, ctrl, t)!, b = Offset.lerp(ctrl, c.to, t)!;
+                _drawCoin(canvas, Offset.lerp(a, b, t)!, 9, flip: cos(t * pi * 4));
+              }
+            }
+
+            @override
+            bool shouldRepaint(covariant _CoinPainter old) => true;
           }
           BARBUT_EOF
           cat > lib/main.dart <<'BARBUT_EOF'
@@ -2344,6 +2677,37 @@ jobs:
             }
           }
           BARBUT_EOF
+          cat > lib/purse.dart <<'BARBUT_EOF'
+          import 'package:shared_preferences/shared_preferences.dart';
+
+          import 'errors.dart';
+
+          /// Kalıcı kese: iki oyuncunun akçesi telefonda saklanır, oyun kapanınca kaybolmaz.
+          class Purse {
+            static const _key = 'kese_v1';
+
+            static Future<List<int>?> load() async {
+              try {
+                final p = await SharedPreferences.getInstance();
+                final l = p.getStringList(_key);
+                if (l == null || l.length != 2) return null;
+                return [for (final v in l) int.tryParse(v) ?? 0];
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+                return null;
+              }
+            }
+
+            static Future<void> save(List<int> akce) async {
+              try {
+                final p = await SharedPreferences.getInstance();
+                await p.setStringList(_key, [for (final v in akce) '$v']);
+              } catch (e, s) {
+                ErrorLog.add(e, s);
+              }
+            }
+          }
+          BARBUT_EOF
           cat > lib/shake.dart <<'BARBUT_EOF'
           import 'dart:async';
           import 'dart:math';
@@ -2427,7 +2791,7 @@ jobs:
               'table_hit_6', 'table_hit_7', 'table_hit_8', 'table_tick_1', 'table_tick_2', 'table_tick_3',
               'table_tick_4', 'table_tick_5', 'table_tick_6', 'throw_1', 'throw_2', 'throw_3',
               'tick_1', 'tick_2', 'tick_3', 'tick_4', 'win', 'win_fun',
-              'lose_fun',
+              'lose_fun', 'coin_1', 'coin_2', 'coin_3',
             ];
 
             /// Müzikler üretilmiş WAV, zar sesleri gerçek kayıtlardan kesilmiş OGG.
@@ -3336,6 +3700,17 @@ jobs:
               expect(targetHint(12), '12\'yi geçmek imkânsız · 11 ve altı kaybeder · 12 berabere');
               expect(targetHint(2), '3 ve üstü kazanır · 2 berabere');
             });
+
+            test('kese kalıcı: yeni oyunda yalnızca batan oyuncuya veresiye verilir', () {
+              final g = Game();
+              g.akce[0] = 0;
+              g.akce[1] = 340;
+              g.winner = 1;
+              g.reset();
+              expect(g.akce, [100, 340]);
+              g.resetPurses();
+              expect(g.akce, [100, 100]);
+            });
           }
           BARBUT_EOF
           cat > tool/make_icon.py <<'BARBUT_EOF'
@@ -3709,6 +4084,19 @@ jobs:
               add(x, horn(dur, freq, wah, amp, nh=22, breath=0.03), at, 0.5)
           x = room_s(x, 0.15)
           save("lose_fun.wav", x / np.max(np.abs(x)) * 0.8, peak=0.72)
+
+          # --- akçe şıngırtısı: metal paranın uyumsuz kısmi tonları hızla söner; üç perde
+          def coin(pitch):
+              dur = 0.35
+              n = int(SR * dur)
+              t = np.arange(n) / SR
+              x = np.zeros(n)
+              for f, a, d in ((3150, 1.0, 0.09), (4970, 0.6, 0.07), (7430, 0.35, 0.05), (9900, 0.2, 0.03), (2210, 0.25, 0.12)):
+                  x += a * np.sin(2 * np.pi * f * pitch * t) * np.exp(-t / d)
+              x += 0.15 * np.random.randn(n) * np.exp(-t / 0.004)  # temas anı
+              return x
+          for i, p in enumerate((0.94, 1.0, 1.07)):
+              save(f"coin_{i + 1}.wav", room_s(coin(p), 0.08), peak=0.7)
           BARBUT_EOF
           ls -R lib test tool
 
